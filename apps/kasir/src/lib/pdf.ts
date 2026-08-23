@@ -1,6 +1,6 @@
 const A4_W = 595.28;
 const A4_H = 841.89;
-const MARGIN = 40;
+const MARGIN = 56;
 
 function pdfStr(s: string) {
   let out = "(";
@@ -111,7 +111,7 @@ function rect(x: number, y: number, w: number, h: number, fill: string) {
 function headerBlock(input: ReportPdfInput, page: number, pages: number) {
   const navy = rgb("0b1f3a");
   const muted = rgb("3d4f66");
-  let y = A4_H - 36;
+  let y = A4_H - MARGIN;
   let s = "";
   s += text("F2", 16, MARGIN, y, fit(input.storeName, 62), navy);
   y -= 14;
@@ -146,7 +146,7 @@ export function buildReportPdf(input: ReportPdfInput): Uint8Array {
     const scale = innerW / sumW;
     const widths = cols.map((c) => c.width * scale);
     const rowH = 16;
-    const usable = A4_H - 140 - 56;
+    const usable = A4_H - 168 - MARGIN;
     const perPage = Math.max(8, Math.floor(usable / rowH) - 1);
     const tablePages: ReportPdfRow[][] = [];
     for (let i = 0; i < input.table.rows.length; i += perPage) {
@@ -206,7 +206,7 @@ export function buildReportPdf(input: ReportPdfInput): Uint8Array {
   }
 
   const lineH = 18;
-  const usable = A4_H - 120 - 56;
+  const usable = A4_H - 148 - MARGIN;
   const chunks: ReportPdfLine[][] = [];
   let bucket: ReportPdfLine[] = [];
   let used = 0;

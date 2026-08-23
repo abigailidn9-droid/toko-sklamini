@@ -1,4 +1,4 @@
-export const PAY_METHODS = ["tunai", "qris", "transfer", "kartu", "hutang"] as const;
+export const PAY_METHODS = ["tunai", "qris", "transfer", "kartu"] as const;
 export type PayMethod = (typeof PAY_METHODS)[number];
 
 export const USER_ROLES = ["owner", "kasir"] as const;
@@ -80,7 +80,6 @@ export type Sale = {
   cashierId: string;
   cashierName: string;
   customerId: string | null;
-  customerName: string;
   method: PayMethod;
   subtotal: number;
   discount: number;
@@ -96,27 +95,6 @@ export type Sale = {
   voidedAt: string | null;
   items: SaleItem[];
   payments: SalePayment[];
-};
-
-export type Customer = {
-  id: string;
-  name: string;
-  phone: string;
-  note: string;
-  active: boolean;
-  updatedAt: string;
-  debt: number;
-};
-
-export type CustomerPayment = {
-  id: string;
-  customerId: string;
-  amount: number;
-  method: PayMethod;
-  note: string;
-  createdAt: string;
-  cashierId: string;
-  cashierName: string;
 };
 
 export type CartSnapshot = {
@@ -170,6 +148,37 @@ export type Employee = {
   name: string;
   jobRole: string;
   active: boolean;
+};
+
+export const MEMBER_FEE = 20_000;
+export const MEMBER_VISIT_GOAL = 30;
+export const MEMBER_REWARD_NAME = "Hot Wheels Premium";
+
+export type Member = {
+  id: string;
+  name: string;
+  phone: string;
+  active: boolean;
+  updatedAt: string;
+};
+
+export type MemberFee = {
+  id: string;
+  memberId: string;
+  amount: number;
+  method: PayMethod;
+  createdAt: string;
+  cashierId: string;
+  cashierName: string;
+};
+
+export type MemberReward = {
+  id: string;
+  memberId: string;
+  visits: number;
+  createdAt: string;
+  cashierId: string;
+  cashierName: string;
 };
 
 export type Attendance = {
@@ -278,8 +287,6 @@ export type ArusKas = {
   qris: number;
   transfer: number;
   kartu: number;
-  hutang: number;
-  pelunasan: number;
   nonTunai: number;
   pengeluaran: number;
   restockTunai: number;
@@ -303,7 +310,7 @@ export const DEFAULT_SETTINGS: StoreSettings = {
   printer58: "generic",
   printerA4: "a4",
   paperWidth: "58",
-  autoPrint: "ask",
+  autoPrint: "58mm",
   printerConnection: "usb",
   printerBtId: "",
   printerBtName: "",
@@ -312,8 +319,8 @@ export const DEFAULT_SETTINGS: StoreSettings = {
   scannerName: "",
   ppnEnabled: false,
   ppnRate: 11,
-  apiUrl: "http://127.0.0.1:8787",
-  apiToken: "",
+  apiUrl: "http://147.139.209.86:8787",
+  apiToken: "sklamini-toko-7c4e91a2b8d3",
   bankName: "BCA",
   bankAccount: "1234567890",
   bankHolder: "TOKO SKLAMINI",
@@ -338,7 +345,6 @@ export const PAY_METHOD_LABEL: Record<PayMethod, string> = {
   qris: "QRIS",
   transfer: "Transfer",
   kartu: "Kartu",
-  hutang: "Hutang",
 };
 
 export function salePaymentsOf(sale: Pick<Sale, "method" | "total" | "payments">): SalePayment[] {

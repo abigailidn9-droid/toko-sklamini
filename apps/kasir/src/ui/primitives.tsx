@@ -1,4 +1,4 @@
-import { useEffect, useState, type ButtonHTMLAttributes, type InputHTMLAttributes, type ReactNode, type SelectHTMLAttributes } from "react";
+import { forwardRef, useEffect, useState, type ButtonHTMLAttributes, type InputHTMLAttributes, type ReactNode, type SelectHTMLAttributes } from "react";
 
 export function H2({ children }: { children: ReactNode }) {
   return <h2 className="h2">{children}</h2>;
@@ -38,9 +38,9 @@ export function Button({
   );
 }
 
-export function Field(props: InputHTMLAttributes<HTMLInputElement>) {
-  return <input className="field" {...props} />;
-}
+export const Field = forwardRef<HTMLInputElement, InputHTMLAttributes<HTMLInputElement>>(function Field(props, ref) {
+  return <input ref={ref} className="field" {...props} />;
+});
 
 export function Select({ className, ...props }: SelectHTMLAttributes<HTMLSelectElement>) {
   return <select className={`field${className ? ` ${className}` : ""}`} {...props} />;

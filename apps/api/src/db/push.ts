@@ -125,6 +125,14 @@ export async function pushSchema() {
       cashier_id text NOT NULL,
       cashier_name text NOT NULL
     );
+    CREATE TABLE IF NOT EXISTS member_rewards (
+      id text PRIMARY KEY,
+      customer_id text NOT NULL,
+      visits integer NOT NULL,
+      created_at timestamptz NOT NULL,
+      cashier_id text NOT NULL,
+      cashier_name text NOT NULL
+    );
     CREATE TABLE IF NOT EXISTS cash_shifts (
       id text PRIMARY KEY,
       cashier_id text NOT NULL,

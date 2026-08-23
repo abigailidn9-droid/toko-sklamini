@@ -1,11 +1,12 @@
 import { useEffect, useMemo, useRef, useState } from "react";
 import {
   PAY_METHOD_LABEL,
-  PAY_METHODS,
   calcPpn,
   formatQty,
   formatRupiahInput,
   looksLikeCompleteBarcode,
+  MEMBER_REWARD_NAME,
+  MEMBER_VISIT_GOAL,
   parseRupiah,
   ppnLabel,
   rp,
@@ -15,7 +16,7 @@ import {
   type Product,
   type StoreSettings,
 } from "@sklamini/shared";
-import { Button, Callout, Field, H2, QtyStepper, Select, Stat, Text } from "../ui/primitives.tsx";
+import { Button, Callout, Field, H2, QtyStepper, Stat, Text } from "../ui/primitives.tsx";
 import { PageShell } from "../components/PageHeader.tsx";
 import {
   checkout,
@@ -24,14 +25,17 @@ import {
   findProductByBarcode,
   lastClosedShift,
   latestCompletedSale,
-  listCustomers,
   listDrafts,
+  listMembers,
   listProducts,
+  memberPendingRewards,
+  memberVisitCount,
   openCashShift,
   saveDraft,
   type Session,
 } from "../lib/repo.ts";
 import { missBeep, scanBeep } from "../lib/beep.ts";
+import { useScanFocus } from "../lib/useScanFocus.ts";
 import { printStruk } from "../lib/print.ts";
 import { useToast } from "../ui/toast.tsx";
 
@@ -183,9 +187,8 @@ export function KasirPage({
   const [priceEditStr, setPriceEditStr] = useState("");
   const [payOpen, setPayOpen] = useState(false);
   const [payMethod, setPayMethod] = useState<PayMethod>("tunai");
-  const [payParts, setPayParts] = useState<Partial<Record<PayMethod, string>>>({});
-  const [customerId, setCustomerId] = useState("");
   const [cashIn, setCashIn] = useState("100.000");
+  const [memberId, setMemberId] = useState<string | null>(null);
   const toast = useToast();
   const [err, setErr] = useState("");
   const [clearOpen, setClearOpen] = useState(false);
@@ -193,6 +196,11 @@ export function KasirPage({
   const scanPrevRef = useRef("");
   const scanAtRef = useRef(0);
   const lastSale = useMemo(() => latestCompletedSale(), [tick]);
+  const overlayOpen = Boolean(payOpen || extraEdit || clearOpen || priceEditId || !shift);
+  const { ref: scanRef, focus: focusScan } = useScanFocus(!overlayOpen, {
+    restoreOnWindowFocus: true,
+    returnAfterClick: true,
+  });
 
   useEffect(() => {
     if (restore) {
@@ -233,9 +241,7 @@ export function KasirPage({
   const ppn = calcPpn(subtotal, discount, settings.ppnEnabled, settings.ppnRate);
   const total = Math.max(0, subtotal - discount + ppn + deliveryCost);
   const paid = parseRupiah(cashIn);
-  const payList = PAY_METHODS.map((m) => ({ method: m, amount: parseRupiah(payParts[m] ?? "") })).filter((p) => p.amount > 0);
-  const tunaiNeed = payList.filter((p) => p.method === "tunai").reduce((n, p) => n + p.amount, 0);
-  const change = Math.max(0, paid - tunaiNeed);
+  const change = payMethod === "tunai" ? Math.max(0, paid - total) : 0;
 
   function resetCart() {
     setCart([]);
@@ -245,6 +251,7 @@ export function KasirPage({
     setNote("");
     setExtraEdit(null);
     setPriceEditId(null);
+    setMemberId(null);
   }
 
   function missBarcode(code: string) {
@@ -253,6 +260,7 @@ export function KasirPage({
     setScan("");
     scanBurstRef.current = false;
     scanPrevRef.current = "";
+    focusScan(true);
   }
 
   function addProduct(p: Product, fromScan = false) {
@@ -289,6 +297,7 @@ export function KasirPage({
       return;
     }
     if (fromScan) scanBeep();
+    focusScan(true);
   }
 
   function onScanChange(v: string) {
@@ -353,6 +362,10 @@ export function KasirPage({
   }
 
   function hold() {
+    if (!shift) {
+      toast.show("Kasir belum dibuka", "error", "Isi kas awal dulu.");
+      return;
+    }
     if (!cart.length) return;
     saveDraft({
       cashier: session,
@@ -367,8 +380,11 @@ export function KasirPage({
   }
 
   function openPay() {
+    if (!shift) {
+      toast.show("Kasir belum dibuka", "error", "Isi kas awal dulu.");
+      return;
+    }
     if (!cart.length) return;
-    setPayParts({ tunai: formatRupiahInput(String(total)) });
     setPayMethod("tunai");
     const current = parseRupiah(cashIn);
     setCashIn(formatRupiahInput(String(current >= total ? current : total)));
@@ -400,25 +416,30 @@ export function KasirPage({
       const sale = checkout({
         lines: cart,
         method: payMethod,
-        paid,
+        paid: payMethod === "tunai" ? paid : total,
         cashier: session,
         discount,
         deliveryCost,
         ppn,
         ppnRate: settings.ppnEnabled ? settings.ppnRate : 0,
         note,
-        customerId: customerId || null,
-        payments: payList.length ? payList : [{ method: payMethod, amount: total }],
+        customerId: memberId,
+        payments: [{ method: payMethod, amount: total }],
       });
+      const visits = memberId ? memberVisitCount(memberId) : 0;
+      const pending = memberId ? memberPendingRewards(memberId) : 0;
       resetCart();
       setPayOpen(false);
-      setCustomerId("");
-      setPayParts({});
       setErr("");
       toast.show("Transaksi tersimpan", "ok", sale.localNo);
+      if (pending > 0) {
+        toast.show("Hadiah member", "ok", `${MEMBER_REWARD_NAME} · ${visits} kali belanja`);
+      }
       onPaid(sale.id, sale.total);
     } catch (e) {
-      setErr(e instanceof Error ? e.message : "Gagal simpan");
+      const msg = e instanceof Error ? e.message : "Gagal simpan";
+      setErr(msg);
+      toast.show("Transaksi gagal", "error", msg);
     }
   }
 
@@ -429,7 +450,7 @@ export function KasirPage({
           <div className="kasir-toolbar">
             <div className="row">
               <Field
-                autoFocus
+                ref={scanRef}
                 placeholder="Scan barcode atau cari nama…"
                 value={scan}
                 onChange={(e) => onScanChange(e.target.value)}
@@ -727,13 +748,13 @@ export function KasirPage({
         <PayDialog
           total={total}
           settings={settings}
-          payParts={payParts}
-          setPayParts={setPayParts}
-          customerId={customerId}
-          setCustomerId={setCustomerId}
+          payMethod={payMethod}
+          setPayMethod={setPayMethod}
           cashIn={cashIn}
           setCashIn={setCashIn}
           change={change}
+          memberId={memberId}
+          setMemberId={setMemberId}
           error={err}
           onClose={() => setPayOpen(false)}
           onPaid={savePay}
@@ -928,60 +949,52 @@ function ExtraFillDialog({
 function PayDialog({
   total,
   settings,
-  payParts,
-  setPayParts,
-  customerId,
-  setCustomerId,
+  payMethod,
+  setPayMethod,
   cashIn,
   setCashIn,
   change,
+  memberId,
+  setMemberId,
   error,
   onClose,
   onPaid,
 }: {
   total: number;
   settings: StoreSettings;
-  payParts: Partial<Record<PayMethod, string>>;
-  setPayParts: (v: Partial<Record<PayMethod, string>> | ((p: Partial<Record<PayMethod, string>>) => Partial<Record<PayMethod, string>>)) => void;
-  customerId: string;
-  setCustomerId: (v: string) => void;
+  payMethod: PayMethod;
+  setPayMethod: (m: PayMethod) => void;
   cashIn: string;
   setCashIn: (v: string) => void;
   change: number;
+  memberId: string | null;
+  setMemberId: (id: string | null) => void;
   error: string;
   onClose: () => void;
   onPaid: () => void;
 }) {
-  const customers = useMemo(() => listCustomers(), []);
-  const [custQ, setCustQ] = useState("");
   const methods: { id: PayMethod; hint: string }[] = [
     { id: "tunai", hint: "Cash" },
     { id: "qris", hint: "Scan QR" },
     { id: "transfer", hint: "Bank" },
     { id: "kartu", hint: "Debit / kredit" },
-    { id: "hutang", hint: "Piutang" },
   ];
-  const allocated = PAY_METHODS.reduce((n, m) => n + parseRupiah(payParts[m] ?? ""), 0);
-  const sisa = total - allocated;
-  const hutangAmt = parseRupiah(payParts.hutang ?? "");
-  const tunaiAmt = parseRupiah(payParts.tunai ?? "");
+  const paid = parseRupiah(cashIn);
+  const kurang = payMethod === "tunai" && paid < total;
   const bankLine = [settings.bankName.trim(), settings.bankAccount.trim(), settings.bankHolder.trim() ? `a.n. ${settings.bankHolder.trim()}` : ""]
     .filter(Boolean)
     .join(" ");
-  const custShown = customers.filter((c) => {
-    const s = custQ.trim().toLowerCase();
-    if (!s) return true;
-    return c.name.toLowerCase().includes(s) || c.phone.includes(s);
-  });
-
-  function setPart(method: PayMethod, raw: string) {
-    setPayParts((prev) => ({ ...prev, [method]: formatRupiahInput(raw) }));
-  }
-
-  function isiSisa(method: PayMethod) {
-    const others = allocated - parseRupiah(payParts[method] ?? "");
-    setPart(method, String(Math.max(0, total - others)));
-  }
+  const [memberQ, setMemberQ] = useState("");
+  const members = listMembers();
+  const selected = members.find((m) => m.id === memberId) ?? null;
+  const hits = memberQ.trim()
+    ? members
+        .filter((m) => {
+          const s = memberQ.trim().toLowerCase();
+          return m.name.toLowerCase().includes(s) || m.phone.includes(s.replace(/\D/g, ""));
+        })
+        .slice(0, 6)
+    : [];
 
   return (
     <div className="overlay" style={{ position: "fixed", inset: 0 }}>
@@ -989,7 +1002,7 @@ function PayDialog({
         className="modal pay-modal"
         onSubmit={(e) => {
           e.preventDefault();
-          onPaid();
+          if (!kurang) onPaid();
         }}
       >
         <div className="stack">
@@ -1004,56 +1017,63 @@ function PayDialog({
             <span>Total yang harus dibayar</span>
             <b className="tabular">{rp(total)}</b>
           </div>
-          <Text small tone="secondary">
-            Isi satu atau beberapa metode. Jumlah harus sama dengan total. Sisa {rp(sisa)}.
-          </Text>
-          {methods.map((m) => (
-            <div key={m.id} className="pay-split-row">
+          <div className="pay-member">
+            {selected ? (
+              <div className="pay-member-on">
+                <div>
+                  <b>{selected.name}</b>
+                  <span>
+                    {selected.phone} · {memberVisitCount(selected.id)}/{MEMBER_VISIT_GOAL} belanja
+                  </span>
+                </div>
+                <Button type="button" variant="ghost" onClick={() => setMemberId(null)}>
+                  Hapus
+                </Button>
+              </div>
+            ) : (
+              <>
+                <Field
+                  placeholder="Member: nama atau telepon (opsional)"
+                  value={memberQ}
+                  onChange={(e) => setMemberQ(e.target.value)}
+                />
+                {hits.length ? (
+                  <div className="pay-member-hits">
+                    {hits.map((m) => (
+                      <button
+                        key={m.id}
+                        type="button"
+                        onClick={() => {
+                          setMemberId(m.id);
+                          setMemberQ("");
+                        }}
+                      >
+                        <b>{m.name}</b>
+                        <span>{m.phone}</span>
+                      </button>
+                    ))}
+                  </div>
+                ) : null}
+              </>
+            )}
+          </div>
+          <div className="pay-methods">
+            {methods.map((m) => (
               <button
+                key={m.id}
                 type="button"
-                className={`method-btn compact ${parseRupiah(payParts[m.id] ?? "") ? "on" : ""}`}
+                className={`method-btn ${payMethod === m.id ? "on" : ""}`}
                 onClick={() => {
-                  if (parseRupiah(payParts[m.id] ?? "")) setPart(m.id, "");
-                  else isiSisa(m.id);
+                  setPayMethod(m.id);
+                  if (m.id === "tunai" && paid < total) setCashIn(formatRupiahInput(String(total)));
                 }}
               >
                 <b>{PAY_METHOD_LABEL[m.id]}</b>
                 <span>{m.hint}</span>
               </button>
-              <div className="money-field">
-                <span>Rp</span>
-                <input
-                  className="field"
-                  inputMode="numeric"
-                  value={payParts[m.id] ?? ""}
-                  placeholder="0"
-                  onChange={(e) => setPart(m.id, e.target.value)}
-                />
-              </div>
-              <Button type="button" onClick={() => isiSisa(m.id)}>
-                Sisa
-              </Button>
-            </div>
-          ))}
-          {hutangAmt > 0 ? (
-            <div className="stack" style={{ gap: 8 }}>
-              <Field
-                placeholder="Cari pelanggan…"
-                value={custQ}
-                onChange={(e) => setCustQ(e.target.value)}
-              />
-              <Select value={customerId} onChange={(e) => setCustomerId(e.target.value)}>
-                <option value="">Pilih pelanggan</option>
-                {custShown.map((c) => (
-                  <option key={c.id} value={c.id}>
-                    {c.name}
-                    {c.debt ? ` · hutang ${rp(c.debt)}` : ""}
-                  </option>
-                ))}
-              </Select>
-            </div>
-          ) : null}
-          {tunaiAmt > 0 ? (
+            ))}
+          </div>
+          {payMethod === "tunai" ? (
             <div className="stack" style={{ gap: 10 }}>
               <Text small tone="secondary">
                 Uang tunai diterima
@@ -1069,7 +1089,7 @@ function PayDialog({
                 />
               </div>
               <div className="row wrap">
-                {[String(tunaiAmt), String(total), "50000", "100000", "150000", "200000"]
+                {[String(total), "50000", "100000", "150000", "200000"]
                   .filter((n, i, arr) => arr.indexOf(n) === i)
                   .map((n) => (
                     <button
@@ -1088,10 +1108,10 @@ function PayDialog({
               </div>
             </div>
           ) : null}
-          {parseRupiah(payParts.qris ?? "") > 0 ? (
+          {payMethod === "qris" ? (
             <Callout title="QRIS">Tampilkan QR ke pelanggan. Setelah berhasil, Simpan.</Callout>
           ) : null}
-          {parseRupiah(payParts.transfer ?? "") > 0 ? (
+          {payMethod === "transfer" ? (
             <Callout title="Transfer">
               {bankLine ? `${bankLine}. Konfirmasi setelah dana masuk.` : "Isi rekening di Pengaturan."}
             </Callout>
@@ -1102,7 +1122,7 @@ function PayDialog({
             </Callout>
           ) : null}
           <div className="pay-actions">
-            <Button type="submit" variant="primary" disabled={sisa !== 0}>
+            <Button type="submit" variant="primary" disabled={kurang}>
               Simpan · Enter
             </Button>
             <Button type="button" onClick={onClose}>
@@ -1203,7 +1223,6 @@ export function DraftPage({
                           deliveryCost: d.deliveryCost,
                           note: d.note,
                         });
-                        deleteDraft(d.id);
                       }}
                     >
                       Buka

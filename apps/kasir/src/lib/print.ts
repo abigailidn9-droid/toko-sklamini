@@ -1,5 +1,5 @@
 import { EXPENSE_LABEL, PAY_METHOD_LABEL, formatDateTime, formatQty, ppnLabel, rp, saleMethodLabel, type Sale, type StoreSettings } from "@sklamini/shared";
-import type { ShiftSettlement } from "./repo.ts";
+import { getMember, type ShiftSettlement } from "./repo.ts";
 import { drawerPrinterName } from "./cashDrawer.ts";
 import { tauriInvoke } from "./tauri.ts";
 
@@ -39,6 +39,17 @@ function whenParts(iso: string) {
   };
 }
 
+/** Kembalian hanya untuk tunai. QRIS / transfer / kartu tidak punya kembalian. */
+export function saleChange(sale: Sale): number {
+  const pays = (sale.payments ?? []).filter((p) => p.amount > 0);
+  const method = pays.length === 1 ? pays[0].method : sale.method;
+  if (method !== "tunai") return 0;
+  if (pays.length && !pays.some((p) => p.method === "tunai")) return 0;
+  // Data rusak lama: non-tunai tersimpan paid = total dan kembalian = total.
+  if (sale.paid === sale.total && sale.changeAmount === sale.total) return 0;
+  return Math.max(0, sale.changeAmount);
+}
+
 function printHtml(title: string, body: string, kind: "struk" | "nota", paperMm: "58" | "80" = "58") {
   const frame = document.createElement("iframe");
   frame.style.position = "fixed";
@@ -55,7 +66,7 @@ function printHtml(title: string, body: string, kind: "struk" | "nota", paperMm:
   doc.open();
   doc.write(`<!doctype html><html><head><title>${esc(title)}</title>
   <style>
-    @page { size: ${page}; margin: ${kind === "struk" ? "2mm" : "16mm"}; }
+    @page { size: ${page}; margin: ${kind === "struk" ? "2mm" : "16mm 20mm"}; }
     * { box-sizing: border-box; }
     body {
       margin: 0;
@@ -87,13 +98,14 @@ function printHtml(title: string, body: string, kind: "struk" | "nota", paperMm:
     td { padding: 1px 0; vertical-align: top; }
     .r { text-align: right; white-space: nowrap; }
     .meta td { font-size: 11px; }
-    .item-name { font-weight: 700; padding-top: 3px; }
-    .item-name:first-child { padding-top: 0; }
+    .item-name { font-weight: 700; padding-top: 0; }
+    .item-sp td { height: 1.35em; padding: 0; line-height: 1.35em; }
     .qty { font-size: 11px; }
     .sum td { padding: 1px 0; }
     .grand td { font-size: 13px; font-weight: 700; padding: 3px 0 4px; }
     .foot { text-align: center; font-size: 10.5px; line-height: 1.4; }
-    .nota { width: 100%; font-size: 14px; }
+    .foot-space { height: 2.6em; }
+    .nota { box-sizing: border-box; width: 100%; padding: 4mm 12mm 8mm; font-size: 14px; }
     .nota h1 { font-size: 22px; margin: 0 0 6px; text-align: center; }
     .nota .logo { max-width: 42mm; max-height: 28mm; }
     .muted { color: #333; }
@@ -107,8 +119,10 @@ function printHtml(title: string, body: string, kind: "struk" | "nota", paperMm:
     h2.sec-title { font-size: 16px; margin: 0 0 8px; text-align: center; }
 
     .invoice {
+      box-sizing: border-box;
       width: 100%;
       min-height: 262mm;
+      padding: 10mm 18mm 14mm;
       display: flex;
       flex-direction: column;
       color: #122033;
@@ -119,7 +133,7 @@ function printHtml(title: string, body: string, kind: "struk" | "nota", paperMm:
     .invoice .bar {
       height: 6px;
       background: #0b1f3a;
-      margin: -2mm -2mm 14px;
+      margin: 0 0 14px;
     }
     .inv-head {
       display: flex;
@@ -269,7 +283,7 @@ function printHtml(title: string, body: string, kind: "struk" | "nota", paperMm:
 function itemRows(sale: Sale) {
   return sale.items
     .map(
-      (it, i) => `<tr>
+      (it, i) => `${i ? `<tr class="item-sp"><td colspan="2">&nbsp;</td></tr>` : ""}<tr>
         <td colspan="2" class="item-name">${i + 1}. ${esc(it.name)}</td>
       </tr>
       <tr>
@@ -291,47 +305,7 @@ function escPosText(s: string): Uint8Array {
   return enc.encode(s.replace(/\r/g, ""));
 }
 
-function buildEscPos(sale: Sale, settings: StoreSettings): Uint8Array {
-  const { date, time } = whenParts(sale.createdAt);
-  const w = settings.paperWidth === "80" ? 48 : 32;
-  const line = (left: string, right: string) => {
-    const gap = Math.max(1, w - left.length - right.length);
-    return left + " ".repeat(gap) + right;
-  };
-  const dash = "-".repeat(w);
-  const parts: string[] = [];
-  parts.push("\x1B\x40");
-  parts.push("\x1B\x61\x01");
-  parts.push(`${settings.storeName}\n`);
-  if (settings.address.trim()) parts.push(`${settings.address.trim()}\n`);
-  if (settings.phone.trim()) parts.push(`${settings.phone.trim()}\n`);
-  parts.push("\x1B\x61\x00");
-  parts.push(`${dash}\n`);
-  parts.push(`${line(sale.localNo, sale.cashierName)}\n`);
-  parts.push(`${line(date, time)}\n`);
-  if (sale.customerName) parts.push(`Pelanggan: ${sale.customerName}\n`);
-  parts.push(`${dash}\n`);
-  for (const it of sale.items) {
-    parts.push(`${it.name}\n`);
-    parts.push(`${line(`${formatQty(it.qty)} x ${rp(it.sellPrice)}`, rp(it.sellPrice * it.qty))}\n`);
-  }
-  parts.push(`${dash}\n`);
-  parts.push(`${line("Subtotal", rp(sale.subtotal))}\n`);
-  if (sale.discount) parts.push(`${line("Diskon", `-${rp(sale.discount)}`)}\n`);
-  if (sale.ppn) parts.push(`${line(ppnLabel(sale.ppnRate), rp(sale.ppn))}\n`);
-  if (sale.deliveryCost) parts.push(`${line("Ongkir", rp(sale.deliveryCost))}\n`);
-  parts.push(`${line("TOTAL", rp(sale.total))}\n`);
-  const pays = sale.payments?.length ? sale.payments : [{ method: sale.method, amount: sale.total }];
-  for (const p of pays.filter((x) => x.amount > 0)) {
-    parts.push(`${line(PAY_METHOD_LABEL[p.method], rp(p.amount))}\n`);
-  }
-  parts.push(`${line("Kembali", rp(sale.changeAmount))}\n`);
-  parts.push(`${dash}\n`);
-  parts.push("\x1B\x61\x01");
-  if (sale.note.trim()) parts.push(`${sale.note.trim()}\n`);
-  parts.push(`${settings.receiptFooter}\n\n\n`);
-  parts.push("\x1D\x56\x00");
-  const chunks = parts.map(escPosText);
+function concatBytes(chunks: Uint8Array[]): Uint8Array {
   const len = chunks.reduce((n, c) => n + c.length, 0);
   const out = new Uint8Array(len);
   let o = 0;
@@ -340,6 +314,117 @@ function buildEscPos(sale: Sale, settings: StoreSettings): Uint8Array {
     o += c.length;
   }
   return out;
+}
+
+function loadLogoImage(src: string): Promise<HTMLImageElement> {
+  return new Promise((resolve, reject) => {
+    const img = new Image();
+    img.onload = () => resolve(img);
+    img.onerror = () => reject(new Error("logo"));
+    img.src = src;
+  });
+}
+
+async function rasterLogo(dataUrl: string, paperDots: number): Promise<Uint8Array | null> {
+  if (!dataUrl) return null;
+  try {
+    const img = await loadLogoImage(dataUrl);
+    const maxW = Math.min(paperDots, paperDots === 576 ? 360 : 240);
+    const maxH = 128;
+    const scale = Math.min(maxW / Math.max(1, img.width), maxH / Math.max(1, img.height), 1);
+    const drawW = Math.max(8, Math.round(img.width * scale));
+    const h = Math.max(8, Math.round(img.height * scale));
+    const canvasW = paperDots;
+    const canvas = document.createElement("canvas");
+    canvas.width = canvasW;
+    canvas.height = h;
+    const ctx = canvas.getContext("2d");
+    if (!ctx) return null;
+    ctx.fillStyle = "#fff";
+    ctx.fillRect(0, 0, canvasW, h);
+    ctx.drawImage(img, Math.floor((canvasW - drawW) / 2), 0, drawW, h);
+    const { data } = ctx.getImageData(0, 0, canvasW, h);
+    const widthBytes = canvasW / 8;
+    const out = new Uint8Array(8 + widthBytes * h);
+    out[0] = 0x1d;
+    out[1] = 0x76;
+    out[2] = 0x30;
+    out[3] = 0x00;
+    out[4] = widthBytes & 0xff;
+    out[5] = (widthBytes >> 8) & 0xff;
+    out[6] = h & 0xff;
+    out[7] = (h >> 8) & 0xff;
+    let o = 8;
+    for (let y = 0; y < h; y++) {
+      for (let bx = 0; bx < widthBytes; bx++) {
+        let byte = 0;
+        for (let bit = 0; bit < 8; bit++) {
+          const i = (y * canvasW + bx * 8 + bit) * 4;
+          const lum = (data[i] * 299 + data[i + 1] * 587 + data[i + 2] * 114) / 1000;
+          if (data[i + 3] > 80 && lum < 168) byte |= 0x80 >> bit;
+        }
+        out[o++] = byte;
+      }
+    }
+    return out;
+  } catch {
+    return null;
+  }
+}
+
+async function buildEscPos(sale: Sale, settings: StoreSettings): Promise<Uint8Array> {
+  const { date, time } = whenParts(sale.createdAt);
+  const w = settings.paperWidth === "80" ? 48 : 32;
+  const line = (left: string, right: string) => {
+    const gap = Math.max(1, w - left.length - right.length);
+    return left + " ".repeat(gap) + right;
+  };
+  const dash = "-".repeat(w);
+  const parts: Uint8Array[] = [];
+  const push = (s: string) => parts.push(escPosText(s));
+  push("\x1B\x40");
+  const logo = await rasterLogo(settings.logoDataUrl, settings.paperWidth === "80" ? 576 : 384);
+  if (logo) {
+    parts.push(logo);
+    push("\n");
+  }
+  push("\x1B\x61\x01");
+  push(`${settings.storeName}\n`);
+  if (settings.address.trim()) push(`${settings.address.trim()}\n`);
+  if (settings.phone.trim()) push(`${settings.phone.trim()}\n`);
+  push("\x1B\x61\x00");
+  push(`${dash}\n`);
+  push(`${line(sale.localNo, sale.cashierName)}\n`);
+  push(`${line(date, time)}\n`);
+  if (sale.customerId) {
+    const member = getMember(sale.customerId);
+    if (member) push(`${line("Member", member.name)}\n`);
+  }
+  push(`${dash}\n`);
+  for (let i = 0; i < sale.items.length; i++) {
+    const it = sale.items[i];
+    if (i) push("\n");
+    push(`${it.name}\n`);
+    push(`${line(`${formatQty(it.qty)} x ${rp(it.sellPrice)}`, rp(it.sellPrice * it.qty))}\n`);
+  }
+  push(`${dash}\n`);
+  push(`${line("Subtotal", rp(sale.subtotal))}\n`);
+  if (sale.discount) push(`${line("Diskon", `-${rp(sale.discount)}`)}\n`);
+  if (sale.ppn) push(`${line(ppnLabel(sale.ppnRate), rp(sale.ppn))}\n`);
+  if (sale.deliveryCost) push(`${line("Ongkir", rp(sale.deliveryCost))}\n`);
+  push(`${line("TOTAL", rp(sale.total))}\n`);
+  const pays = sale.payments?.length ? sale.payments : [{ method: sale.method, amount: sale.total }];
+  for (const p of pays.filter((x) => x.amount > 0)) {
+    push(`${line(PAY_METHOD_LABEL[p.method], rp(p.amount))}\n`);
+  }
+  const kembali = saleChange(sale);
+  if (kembali > 0) push(`${line("Kembali", rp(kembali))}\n`);
+  push(`${dash}\n`);
+  push("\x1B\x61\x01");
+  if (sale.note.trim()) push(`${sale.note.trim()}\n`);
+  push(`${settings.receiptFooter}\n\n\n`);
+  push("\x1D\x56\x00");
+  return concatBytes(parts);
 }
 
 function bytesToBase64(bytes: Uint8Array): string {
@@ -356,23 +441,32 @@ async function printStrukMaybeRaw(
   settings: StoreSettings,
   html: string,
   paper: "58" | "80",
-) {
+): Promise<boolean> {
   const invoke = tauriInvoke();
   if (invoke) {
-    try {
-      const data = bytesToBase64(buildEscPos(sale, settings));
-      const com = settings.printerConnection === "bluetooth" ? comPortOf(settings) : "";
-      const printerName = drawerPrinterName(settings) || null;
-      await invoke("print_raw", { printerName, data, comPort: com || null });
-      return;
-    } catch {
-      /* dialog cetak sistem */
+    const data = bytesToBase64(await buildEscPos(sale, settings));
+    const com = settings.printerConnection === "bluetooth" ? comPortOf(settings) : "";
+    const named = drawerPrinterName(settings);
+    const tries = named ? [named, ""] : [""];
+    for (const printerName of tries) {
+      try {
+        await invoke("print_raw", {
+          printerName: printerName || null,
+          data,
+          comPort: com || null,
+        });
+        return true;
+      } catch {
+        /* coba printer default */
+      }
     }
+    return false;
   }
   printHtml(sale.localNo, html, "struk", paper);
+  return true;
 }
 
-export function printStruk(sale: Sale, settings: StoreSettings) {
+export function printStruk(sale: Sale, settings: StoreSettings): Promise<boolean> {
   const paper = settings.paperWidth === "80" ? "80" : "58";
   const { date, time } = whenParts(sale.createdAt);
   const qty = sale.items.reduce((n, it) => n + it.qty, 0);
@@ -381,6 +475,8 @@ export function printStruk(sale: Sale, settings: StoreSettings) {
     .filter((p) => p.amount > 0)
     .map((p) => `<tr><td>Bayar (${esc(PAY_METHOD_LABEL[p.method])})</td><td class="r">${rp(p.amount)}</td></tr>`)
     .join("");
+  const kembali = saleChange(sale);
+  const kembaliRow = kembali > 0 ? `<tr><td>Kembali</td><td class="r">${rp(kembali)}</td></tr>` : "";
   const html = `<div class="struk">
       <div class="head">
         ${logoTag(settings)}
@@ -396,7 +492,7 @@ export function printStruk(sale: Sale, settings: StoreSettings) {
         </tr>
         <tr><td>${date}</td><td></td></tr>
         <tr><td>${time}</td><td></td></tr>
-        ${sale.customerName ? `<tr><td colspan="2">Pelanggan : ${esc(sale.customerName)}</td></tr>` : ""}
+        ${sale.customerId && getMember(sale.customerId) ? `<tr><td>Member</td><td class="r">${esc(getMember(sale.customerId)!.name)}</td></tr>` : ""}
       </table>
       <hr class="dash" />
       <table>${itemRows(sale)}</table>
@@ -421,21 +517,65 @@ export function printStruk(sale: Sale, settings: StoreSettings) {
           <td class="r">${rp(sale.total)}</td>
         </tr>
         ${payRows}
-        <tr>
-          <td>Kembali</td>
-          <td class="r">${rp(sale.changeAmount)}</td>
-        </tr>
+        ${kembaliRow}
       </table>
       <hr class="dash" />
       ${sale.note ? `<div class="foot" style="text-align:left;margin-bottom:6px">Catatan: ${esc(sale.note)}</div>` : ""}
       <div class="foot">${esc(settings.receiptFooter)}</div>
+      <div class="foot-space"></div>
     </div>`;
-  void printStrukMaybeRaw(sale, settings, html, paper);
+  return printStrukMaybeRaw(sale, settings, html, paper);
+}
+
+function sampleItem(id: string, name: string, qty: number, sellPrice: number): Sale["items"][number] {
+  return {
+    id,
+    saleId: "test-print",
+    productId: id,
+    barcode: id,
+    name,
+    qty,
+    sellPrice,
+    costPrice: 0,
+  };
+}
+
+export function printTestStruk(settings: StoreSettings): Promise<boolean> {
+  const now = new Date().toISOString();
+  const items = [
+    sampleItem("1", "Contoh Produk A", 2, 5000),
+    sampleItem("2", "Contoh Produk B", 1, 12500),
+  ];
+  const subtotal = items.reduce((n, it) => n + it.sellPrice * it.qty, 0);
+  const sale: Sale = {
+    id: "test-print",
+    localNo: "TES-0001",
+    cashierId: "test",
+    cashierName: "Tes",
+    customerId: null,
+    method: "tunai",
+    subtotal,
+    discount: 0,
+    deliveryCost: 0,
+    ppn: 0,
+    ppnRate: settings.ppnRate,
+    note: "",
+    total: subtotal,
+    paid: subtotal,
+    changeAmount: 0,
+    status: "selesai",
+    createdAt: now,
+    voidedAt: null,
+    items,
+    payments: [{ id: "p1", saleId: "test-print", method: "tunai", amount: subtotal }],
+  };
+  return printStruk(sale, settings);
 }
 
 export function printNota(sale: Sale, settings: StoreSettings) {
   const phone = settings.phone.trim();
   const qty = sale.items.reduce((n, it) => n + it.qty, 0);
+  const kembali = saleChange(sale);
   const when = new Date(sale.createdAt).toLocaleString("id-ID", {
     weekday: "long",
     day: "numeric",
@@ -511,7 +651,7 @@ export function printNota(sale: Sale, settings: StoreSettings) {
           ${sale.deliveryCost ? `<tr><td class="lab">Ongkir</td><td class="r">${rp(sale.deliveryCost)}</td></tr>` : ""}
           <tr class="grand"><td>Total</td><td class="r">${rp(sale.total)}</td></tr>
           <tr><td class="lab">Bayar (${esc(PAY_METHOD_LABEL[sale.method])})</td><td class="r">${rp(sale.paid)}</td></tr>
-          <tr><td class="lab">Kembali</td><td class="r">${rp(sale.changeAmount)}</td></tr>
+          ${kembali > 0 ? `<tr><td class="lab">Kembali</td><td class="r">${rp(kembali)}</td></tr>` : ""}
         </table>
       </div>
       <p class="inv-thanks">${esc(settings.receiptFooter || "Terima kasih telah berbelanja")}</p>
@@ -607,6 +747,7 @@ export function printSettlementStruk(data: ShiftSettlement, settings: StoreSetti
       ${shift.note ? `<hr class="dash" /><div class="foot" style="text-align:left">Catatan: ${esc(shift.note)}</div>` : ""}
       <hr class="dash" />
       <div class="foot">${esc(settings.receiptFooter || "Settlement kasir")}</div>
+      <div class="foot-space"></div>
     </div>`,
     "struk",
     paper,

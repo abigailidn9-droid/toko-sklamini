@@ -145,6 +145,15 @@ export const customerPayments = pgTable("customer_payments", {
   cashierName: text("cashier_name").notNull(),
 });
 
+export const memberRewards = pgTable("member_rewards", {
+  id: text("id").primaryKey(),
+  customerId: text("customer_id").notNull(),
+  visits: integer("visits").notNull(),
+  createdAt: timestamp("created_at", { withTimezone: true }).notNull(),
+  cashierId: text("cashier_id").notNull(),
+  cashierName: text("cashier_name").notNull(),
+});
+
 export const cashShifts = pgTable("cash_shifts", {
   id: text("id").primaryKey(),
   cashierId: text("cashier_id").notNull(),

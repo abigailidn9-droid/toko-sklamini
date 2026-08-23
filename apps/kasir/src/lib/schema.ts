@@ -183,6 +183,14 @@ CREATE TABLE IF NOT EXISTS opname_items (
   fisik REAL NOT NULL,
   selisih REAL NOT NULL
 );
+CREATE TABLE IF NOT EXISTS member_rewards (
+  id TEXT PRIMARY KEY,
+  customer_id TEXT NOT NULL,
+  visits INTEGER NOT NULL,
+  created_at TEXT NOT NULL,
+  cashier_id TEXT NOT NULL,
+  cashier_name TEXT NOT NULL
+);
 CREATE TABLE IF NOT EXISTS settings (
   key TEXT PRIMARY KEY,
   value TEXT NOT NULL
@@ -204,4 +212,6 @@ CREATE INDEX IF NOT EXISTS idx_sales_created ON sales(created_at);
 CREATE INDEX IF NOT EXISTS idx_products_barcode ON products(barcode);
 CREATE INDEX IF NOT EXISTS idx_sale_payments_sale ON sale_payments(sale_id);
 CREATE INDEX IF NOT EXISTS idx_customers_name ON customers(name);
+CREATE INDEX IF NOT EXISTS idx_sales_customer ON sales(customer_id);
+CREATE INDEX IF NOT EXISTS idx_member_rewards_customer ON member_rewards(customer_id);
 `;

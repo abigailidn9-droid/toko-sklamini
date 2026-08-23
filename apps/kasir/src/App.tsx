@@ -1,6 +1,7 @@
 import { type ReactNode, useCallback, useEffect, useState } from "react";
-import type { CartSnapshot, Sale, StoreSettings } from "@sklamini/shared";
+import type { CartSnapshot, StoreSettings } from "@sklamini/shared";
 import { NAV, defaultMenus, type Page } from "./types.ts";
+import { CloudStatus } from "./components/CloudStatus.tsx";
 import { NavGlyph } from "./components/NavGlyph.tsx";
 import { openDb } from "./lib/db.ts";
 import { seedIfEmpty } from "./lib/seed.ts";
@@ -10,13 +11,15 @@ import {
   loadSettings,
   loginByPin,
   backfillUserPins,
+  ensureCloudSettings,
+  ensureMemberMenu,
   type Session,
 } from "./lib/repo.ts";
 import { printNota, printStruk } from "./lib/print.ts";
 import { openCashDrawer } from "./lib/cashDrawer.ts";
-import { syncNow } from "./lib/sync.ts";
+import { syncNow, type ServerStatus } from "./lib/sync.ts";
 import { LoginPage } from "./pages/LoginPage.tsx";
-import { DraftPage, KasirPage, PrintChoiceDialog } from "./pages/KasirPage.tsx";
+import { DraftPage, KasirPage } from "./pages/KasirPage.tsx";
 import { KasPage } from "./pages/KasPage.tsx";
 import { RiwayatPage } from "./pages/RiwayatPage.tsx";
 import { ReturPage } from "./pages/ReturPage.tsx";
@@ -24,13 +27,19 @@ import { ProdukPage } from "./pages/ProdukPage.tsx";
 import { RestockPage } from "./pages/RestockPage.tsx";
 import { OpnamePage } from "./pages/OpnamePage.tsx";
 import { PengeluaranPage } from "./pages/PengeluaranPage.tsx";
-import { PelangganPage } from "./pages/PelangganPage.tsx";
 import { AbsenPage } from "./pages/AbsenPage.tsx";
 import { LaporanPage } from "./pages/LaporanPage.tsx";
+import { MemberPage } from "./pages/MemberPage.tsx";
 import { PengaturanPage } from "./pages/PengaturanPage.tsx";
 import { Button } from "./ui/primitives.tsx";
 
 const SESSION_KEY = "sklamini.session";
+
+function withMemberMenu(menus: readonly string[]): Page[] {
+  const set = new Set(menus);
+  set.add("member");
+  return NAV.map((n) => n.id).filter((id) => set.has(id));
+}
 
 export default function App() {
   const [ready, setReady] = useState(false);
@@ -40,10 +49,9 @@ export default function App() {
   const [clock, setClock] = useState(() => new Date());
   const [tick, setTick] = useState(0);
   const [settings, setSettings] = useState<StoreSettings | null>(null);
-  const [printSale, setPrintSale] = useState<Sale | null>(null);
-  const [printDone, setPrintDone] = useState("");
   const [restore, setRestore] = useState<CartSnapshot | null>(null);
   const [returSaleId, setReturSaleId] = useState<string | null>(null);
+  const [cloud, setCloud] = useState<ServerStatus>({ online: false, pending: 0 });
 
   const refresh = useCallback(() => {
     setTick((n) => n + 1);
@@ -57,6 +65,8 @@ export default function App() {
         await openDb();
         await seedIfEmpty();
         await backfillUserPins();
+        ensureMemberMenu();
+        ensureCloudSettings();
         if (!alive) return;
         const raw = localStorage.getItem(SESSION_KEY);
         if (raw) setSession(JSON.parse(raw) as Session);
@@ -78,11 +88,29 @@ export default function App() {
 
   useEffect(() => {
     if (!ready) return;
-    void syncNow();
-    const t = window.setInterval(() => {
-      void syncNow();
-    }, 20000);
-    return () => window.clearInterval(t);
+    let stopped = false;
+    const tick = async () => {
+      const status = await syncNow();
+      if (!stopped) setCloud(status);
+    };
+    void tick();
+    const timer = window.setInterval(() => {
+      void tick();
+    }, 12000);
+    const onOnline = () => {
+      void tick();
+    };
+    const onVisible = () => {
+      if (document.visibilityState === "visible") void tick();
+    };
+    window.addEventListener("online", onOnline);
+    document.addEventListener("visibilitychange", onVisible);
+    return () => {
+      stopped = true;
+      window.clearInterval(timer);
+      window.removeEventListener("online", onOnline);
+      document.removeEventListener("visibilitychange", onVisible);
+    };
   }, [ready]);
 
   if (bootErr) return <div className="boot">{bootErr}</div>;
@@ -92,6 +120,7 @@ export default function App() {
     return (
       <div className="app-shell login-only">
         <LoginPage
+          settings={settings}
           onEnter={async (pin) => {
             const user = await loginByPin(pin);
             if (!user) return "PIN salah";
@@ -104,7 +133,7 @@ export default function App() {
     );
   }
 
-  const menus = session.menus?.length ? session.menus : defaultMenus(session.role);
+  const menus = withMemberMenu(session.menus?.length ? session.menus : defaultMenus(session.role));
   const items = NAV.filter((n) => menus.includes(n.id));
   const drafts = listDrafts().length;
   const currentPage: Page = menus.includes(page) ? page : (items[0]?.id ?? "kasir");
@@ -122,16 +151,13 @@ export default function App() {
         onRefresh={refresh}
         onPaid={(saleId) => {
           refresh();
+          void syncNow().then(setCloud);
           const sale = getSale(saleId);
           if (!sale) return;
-          void openCashDrawer(settings).catch(() => {});
-          const mode = settings.autoPrint;
+          const tunai = sale.payments.some((p) => p.method === "tunai" && p.amount > 0);
+          if (tunai) void openCashDrawer(settings).catch(() => {});
+          const mode = settings.autoPrint === "ask" ? "58mm" : settings.autoPrint;
           if (mode === "skip") return;
-          if (mode === "ask") {
-            setPrintSale(sale);
-            setPrintDone("");
-            return;
-          }
           if (mode === "58mm" || mode === "both") printStruk(sale, settings);
           if (mode === "A4" || mode === "both") printNota(sale, settings);
         }}
@@ -162,6 +188,8 @@ export default function App() {
         }}
       />
     );
+  } else if (currentPage === "member") {
+    body = <MemberPage session={session} tick={tick} onChange={refresh} />;
   } else if (currentPage === "retur") {
     body = (
       <ReturPage
@@ -180,8 +208,6 @@ export default function App() {
     body = <OpnamePage session={session} tick={tick} onChange={refresh} />;
   } else if (currentPage === "pengeluaran") {
     body = <PengeluaranPage session={session} tick={tick} onChange={refresh} />;
-  } else if (currentPage === "pelanggan") {
-    body = <PelangganPage session={session} tick={tick} onChange={refresh} />;
   } else if (currentPage === "absen") {
     body = <AbsenPage tick={tick} onChange={refresh} />;
   } else if (currentPage === "laporan") {
@@ -193,7 +219,7 @@ export default function App() {
         session={session}
         onSave={(s) => {
           setSettings(s);
-          void syncNow();
+          void syncNow().then(setCloud);
         }}
         onSessionChange={(s) => {
           localStorage.setItem(SESSION_KEY, JSON.stringify(s));
@@ -224,6 +250,7 @@ export default function App() {
           ) : null}
         </div>
         <span className="grow" />
+        <CloudStatus cloud={cloud} />
         <span className="topbar-meta">
           {session.name} · {session.role === "owner" ? "Owner" : "Kasir"}
         </span>
@@ -264,27 +291,6 @@ export default function App() {
       </nav>
       </div>
       <main className={`page${currentPage === "kasir" ? " page-kasir" : currentPage === "pengaturan" ? " page-settings" : ""}`}>{body}</main>
-      {printSale ? (
-        <PrintChoiceDialog
-          total={printSale.total}
-          printed={printDone}
-          onPrint={(kind) => {
-            if (kind === "58mm" || kind === "both") printStruk(printSale, settings);
-            if (kind === "A4" || kind === "both") printNota(printSale, settings);
-            setPrintDone(
-              kind === "both"
-                ? "Struk 58mm dan nota A4 dicetak"
-                : kind === "58mm"
-                  ? "Struk 58mm dicetak"
-                  : "Nota A4 dicetak",
-            );
-          }}
-          onDone={() => {
-            setPrintSale(null);
-            setPrintDone("");
-          }}
-        />
-      ) : null}
     </div>
   );
 }

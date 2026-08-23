@@ -4,12 +4,13 @@ import {
   EXPENSE_LABEL,
   formatDateId,
   formatRupiahInput,
+  localDayFromIso,
   parseRupiah,
   rp,
   todayIso,
   type ExpenseCategory,
 } from "@sklamini/shared";
-import { Button, Callout, Field, H2, Select, Stat, Text } from "../ui/primitives.tsx";
+import { Button, Field, H2, Select } from "../ui/primitives.tsx";
 import { PageShell } from "../components/PageHeader.tsx";
 import { addExpense, listExpenses, type Session } from "../lib/repo.ts";
 import { useToast } from "../ui/toast.tsx";
@@ -33,25 +34,12 @@ export function PengeluaranPage({
 
   const today = todayIso();
   const monthKey = today.slice(0, 7);
-  const todayTotal = rows.filter((r) => r.createdAt.startsWith(today)).reduce((n, r) => n + r.amount, 0);
-  const monthRows = rows.filter((r) => r.createdAt.startsWith(monthKey));
-  const monthTotal = monthRows.reduce((n, r) => n + r.amount, 0);
-  const topCat = useMemo(() => {
-    const tally = new Map<ExpenseCategory, number>();
-    for (const r of rows) {
-      if (!r.createdAt.startsWith(monthKey)) continue;
-      tally.set(r.category, (tally.get(r.category) ?? 0) + r.amount);
-    }
-    let best: ExpenseCategory | null = null;
-    let max = 0;
-    for (const [c, n] of tally) {
-      if (n > max) {
-        best = c;
-        max = n;
-      }
-    }
-    return best ? EXPENSE_LABEL[best] : "—";
-  }, [rows, monthKey]);
+  const todayTotal = rows
+    .filter((r) => localDayFromIso(r.createdAt) === today)
+    .reduce((n, r) => n + r.amount, 0);
+  const monthTotal = rows
+    .filter((r) => localDayFromIso(r.createdAt).startsWith(monthKey))
+    .reduce((n, r) => n + r.amount, 0);
 
   const shown = filter === "Semua" ? rows : rows.filter((r) => r.category === filter);
   const listTotal = shown.reduce((n, r) => n + r.amount, 0);
@@ -73,6 +61,7 @@ export function PengeluaranPage({
       page="pengeluaran"
       title="Pengeluaran"
       hint="Catat biaya toko dan pembelian barang."
+      className="expense-page"
       actions={
         <Button
           variant="primary"
@@ -83,89 +72,96 @@ export function PengeluaranPage({
             setOpen(true);
           }}
         >
-          Catat pengeluaran
+          Catat
         </Button>
       }
     >
-      <div className="grid grid-3">
-        <Stat value={rp(todayTotal)} label="Hari ini" />
-        <Stat value={rp(monthTotal)} label="Bulan ini" tone="warn" />
-        <Stat value={topCat} label="Kategori terbesar" />
-      </div>
-      <div className="row wrap">
-        <button
-          className={`tab ${filter === "Semua" ? "on" : ""}`}
-          type="button"
-          onClick={() => setFilter("Semua")}
-        >
-          Semua
-        </button>
-        {EXPENSE_CATEGORIES.map((c) => (
-          <button
-            key={c}
-            className={`tab ${filter === c ? "on" : ""}`}
-            type="button"
-            onClick={() => setFilter(c)}
-          >
-            {EXPENSE_LABEL[c]}
-          </button>
-        ))}
-      </div>
-      <div className="pay-total">
-        <span>{filter === "Semua" ? "Total tercatat" : EXPENSE_LABEL[filter]}</span>
-        <b className="tabular">{rp(listTotal)}</b>
-      </div>
-      {shown.length === 0 ? (
-        <Callout title="Belum ada pengeluaran">
-          Catat pembelian barang (harga yang dibayar), listrik, sewa, gaji, ATK, atau biaya lain di sini.
-        </Callout>
-      ) : (
-        <table className="data">
-          <thead>
-            <tr>
-              <th>Tanggal</th>
-              <th>Kategori</th>
-              <th>Keterangan</th>
-              <th className="r">Jumlah</th>
-            </tr>
-          </thead>
-          <tbody>
-            {shown.map((r) => (
-              <tr key={r.id} className="striped">
-                <td>
-                  <div className="expense-when">
-                    <b>{formatDateId(r.createdAt.slice(0, 10))}</b>
-                    <span>
-                      {new Date(r.createdAt).toLocaleTimeString("id-ID", {
-                        hour: "2-digit",
-                        minute: "2-digit",
-                      })}
-                    </span>
-                  </div>
-                </td>
-                <td>
-                  <button
-                    type="button"
-                    className="cat-chip"
-                    onClick={() => setFilter(r.category)}
-                  >
-                    {EXPENSE_LABEL[r.category]}
-                  </button>
-                </td>
-                <td>{r.note || "—"}</td>
-                <td className="r tabular">{rp(r.amount)}</td>
-              </tr>
+      <section className="expense-hero">
+        <div className="expense-stats">
+          <div>
+            <span>Hari ini</span>
+            <b className="tabular">{rp(todayTotal)}</b>
+          </div>
+          <div>
+            <span>Bulan ini</span>
+            <b className="tabular">{rp(monthTotal)}</b>
+          </div>
+        </div>
+      </section>
+
+      <section className="expense-list">
+        <div className="expense-list-head">
+          <div className="tabs">
+            <button
+              className={`tab ${filter === "Semua" ? "on" : ""}`}
+              type="button"
+              onClick={() => setFilter("Semua")}
+            >
+              Semua
+            </button>
+            {EXPENSE_CATEGORIES.map((c) => (
+              <button
+                key={c}
+                className={`tab ${filter === c ? "on" : ""}`}
+                type="button"
+                onClick={() => setFilter(c)}
+              >
+                {EXPENSE_LABEL[c]}
+              </button>
             ))}
-          </tbody>
-        </table>
-      )}
-      <Text small tone="tertiary">
-        Pembelian barang memakai harga yang dibayar ke supplier, meski berbeda dari modal di katalog. Itu kas
-        keluar, bukan HPP. Listrik, sewa, gaji, dan lainnya masuk beban laba rugi.
-      </Text>
+          </div>
+          <div className="expense-list-sum">
+            <span>{filter === "Semua" ? "Total" : EXPENSE_LABEL[filter]}</span>
+            <b className="tabular">{rp(listTotal)}</b>
+          </div>
+        </div>
+
+        {shown.length === 0 ? (
+          <div className="expense-empty">
+            <b>Belum ada pengeluaran</b>
+            <span>Catat pembelian, listrik, sewa, gaji, atau biaya lain.</span>
+          </div>
+        ) : (
+          <table className="data">
+            <thead>
+              <tr>
+                <th>Tanggal</th>
+                <th>Kategori</th>
+                <th>Keterangan</th>
+                <th className="r">Jumlah</th>
+              </tr>
+            </thead>
+            <tbody>
+              {shown.map((r) => (
+                <tr key={r.id} className="striped">
+                  <td>
+                    <div className="expense-when">
+                      <b>{formatDateId(localDayFromIso(r.createdAt))}</b>
+                      <span>
+                        {new Date(r.createdAt).toLocaleTimeString("id-ID", {
+                          hour: "2-digit",
+                          minute: "2-digit",
+                        })}
+                      </span>
+                    </div>
+                  </td>
+                  <td>
+                    <button type="button" className="cat-chip" onClick={() => setFilter(r.category)}>
+                      {EXPENSE_LABEL[r.category]}
+                    </button>
+                  </td>
+                  <td>{r.note || "—"}</td>
+                  <td className="r tabular">{rp(r.amount)}</td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
+        )}
+      </section>
+
       {open ? (
         <div className="overlay" style={{ position: "fixed", inset: 0 }}>
-          <div className="modal">
+          <div className="modal expense-modal">
             <div className="stack">
               <div className="row">
                 <H2>Catat pengeluaran</H2>
@@ -176,10 +172,7 @@ export function PengeluaranPage({
               </div>
               <label className="field-label">
                 <span>Kategori</span>
-                <Select
-                  value={category}
-                  onChange={(e) => setCategory(e.target.value as ExpenseCategory)}
-                >
+                <Select value={category} onChange={(e) => setCategory(e.target.value as ExpenseCategory)}>
                   {EXPENSE_CATEGORIES.map((c) => (
                     <option key={c} value={c}>
                       {EXPENSE_LABEL[c]}
@@ -209,7 +202,7 @@ export function PengeluaranPage({
                 <Field
                   placeholder={
                     category === "pembelian"
-                      ? "Contoh: gula 10 kg, harga beda dari modal katalog"
+                      ? "Contoh: gula 10 kg"
                       : "Contoh: token PLN, kertas struk…"
                   }
                   value={note}

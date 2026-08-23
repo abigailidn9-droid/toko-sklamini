@@ -1,5 +1,5 @@
 import { useEffect, useMemo, useState } from "react";
-import { formatDateTime, lineRefund, rp, saleMethodLabel, todayIso, type Sale } from "@sklamini/shared";
+import { formatDateTime, lineRefund, roundQty, rp, saleMethodLabel, todayIso, type Sale } from "@sklamini/shared";
 import { Button, Callout, Field, H2, QtyStepper, Text } from "../ui/primitives.tsx";
 import { PageShell } from "../components/PageHeader.tsx";
 import {
@@ -12,6 +12,7 @@ import {
   type Session,
 } from "../lib/repo.ts";
 import { useToast } from "../ui/toast.tsx";
+import { useScanFocus } from "../lib/useScanFocus.ts";
 
 export function ReturPage({
   session,
@@ -36,6 +37,7 @@ export function ReturPage({
   const [sale, setSale] = useState<Sale | null>(null);
   const [qty, setQty] = useState<Record<string, number>>({});
   const [note, setNote] = useState("");
+  const { ref: scanRef } = useScanFocus(!sale, { restoreOnWindowFocus: true });
 
   useEffect(() => {
     if (!saleId) return;
@@ -84,15 +86,27 @@ export function ReturPage({
     }
   }
 
-  const refund = sale
+  const merch = sale
     ? sale.items.reduce((n, it) => n + lineRefund(sale, it.sellPrice, qty[it.id] ?? 0), 0)
     : 0;
+  const allBack = Boolean(
+    sale &&
+      sale.items.every(
+        (it) => roundQty((qty[it.id] ?? 0) + (returned.byItem[it.id] ?? 0)) + 1e-9 >= it.qty,
+      ),
+  );
+  const refund = merch + (sale && allBack ? sale.deliveryCost : 0);
+  const tunaiPaid = sale
+    ? sale.payments.filter((p) => p.method === "tunai").reduce((n, p) => n + p.amount, 0)
+    : 0;
+  const drawerOut = sale && sale.total > 0 ? Math.round(refund * (tunaiPaid / sale.total)) : 0;
 
   return (
     <PageShell page="retur" title="Retur" hint="Kembalikan sebagian barang dari nota. Stok bertambah, uang tunai keluar dari laci.">
       <div className="row">
         <div className="grow">
           <Field
+            ref={scanRef}
             placeholder="Nomor nota, contoh SKL-…"
             value={q}
             onChange={(e) => setQ(e.target.value)}
@@ -175,10 +189,12 @@ export function ReturPage({
             <span>Pengembalian</span>
             <b className="tabular">{rp(refund)}</b>
           </div>
-          {sale.payments.some((p) => p.method === "tunai") ? (
-            <Callout title="Tunai">Kembalikan uang dari laci sesuai nilai pengembalian.</Callout>
-          ) : sale.payments.some((p) => p.method === "hutang") ? (
-            <Callout title="Hutang">Nilai retur mengurangi sisa piutang pelanggan.</Callout>
+          {drawerOut > 0 && drawerOut < refund ? (
+            <Callout title="Split bayar">
+              Dari laci {rp(drawerOut)}. Sisanya {rp(refund - drawerOut)} lewat saluran non-tunai.
+            </Callout>
+          ) : drawerOut > 0 ? (
+            <Callout title="Tunai">Kembalikan {rp(drawerOut)} dari laci.</Callout>
           ) : (
             <Callout title={saleMethodLabel(sale)}>Tidak memotong kas laci. Refund lewat saluran yang sama.</Callout>
           )}

@@ -1,13 +1,22 @@
 import { useMemo, useState } from "react";
-import { formatDateId, formatDateTime, type Opname } from "@sklamini/shared";
+import { formatDateId, formatDateTime, formatQty, localDayFromIso, roundQty, type Opname } from "@sklamini/shared";
 import { Button, Callout, Field, Text } from "../ui/primitives.tsx";
+import { useScanFocus } from "../lib/useScanFocus.ts";
 import { PageShell } from "../components/PageHeader.tsx";
 import { listOpnames, listProducts, loadSettings, saveOpname, type Session } from "../lib/repo.ts";
 import { buildReportPdf, downloadPdf } from "../lib/pdf.ts";
 import { useToast } from "../ui/toast.tsx";
 
 function signed(n: number) {
-  return n > 0 ? `+${n}` : String(n);
+  return n > 0 ? `+${formatQty(n)}` : formatQty(n);
+}
+
+function parseFisik(raw: string): number | null {
+  const t = raw.trim().replace(",", ".");
+  if (!t) return null;
+  const n = Number.parseFloat(t);
+  if (!Number.isFinite(n) || n < 0) return null;
+  return roundQty(n);
 }
 
 function unduhOpnamePdf(input: {
@@ -19,7 +28,7 @@ function unduhOpnamePdf(input: {
 }) {
   const settings = loadSettings();
   const when = formatDateTime(input.createdAt);
-  const slug = (input.localNo ?? formatDateId(input.createdAt.slice(0, 10))).replace(/\s+/g, "-");
+  const slug = (input.localNo ?? formatDateId(localDayFromIso(input.createdAt))).replace(/\s+/g, "-");
   const filled = input.rows.filter((r) => r.fisik != null);
   downloadPdf(
     `Opname-${slug}.pdf`,
@@ -85,6 +94,7 @@ export function OpnamePage({
   const [q, setQ] = useState("");
   const [note, setNote] = useState("");
   const [tab, setTab] = useState<"baru" | "riwayat">("baru");
+  const { ref: scanRef } = useScanFocus(tab === "baru");
 
   const needle = q.trim().toLowerCase();
   const shown = products.filter(
@@ -99,8 +109,8 @@ export function OpnamePage({
     .map((p) => {
       const raw = fisik[p.id];
       if (raw == null || raw === "") return null;
-      const n = Number.parseInt(raw, 10);
-      if (!Number.isFinite(n) || n < 0) return null;
+      const n = parseFisik(raw);
+      if (n == null) return null;
       const selisih = n - p.stock;
       return selisih === 0 ? null : { product: p, fisik: n, selisih };
     })
@@ -117,8 +127,7 @@ export function OpnamePage({
       note,
       rows: shown.map((p) => {
         const raw = fisik[p.id];
-        const n = raw == null || raw === "" ? null : Number.parseInt(raw, 10);
-        const fisikN = n != null && Number.isFinite(n) && n >= 0 ? n : null;
+        const fisikN = raw == null || raw === "" ? null : parseFisik(raw);
         return {
           name: p.name,
           unit: p.unit,
@@ -189,7 +198,12 @@ export function OpnamePage({
     >
       {tab === "baru" ? (
         <>
-          <Field placeholder="Cari nama atau barcode…" value={q} onChange={(e) => setQ(e.target.value)} />
+          <Field
+            ref={scanRef}
+            placeholder="Cari nama atau barcode…"
+            value={q}
+            onChange={(e) => setQ(e.target.value)}
+          />
           <Callout title="Cara isi">
             Kosongkan kalau tidak dihitung. Isi angka fisik, termasuk 0 jika rak kosong.
           </Callout>
@@ -205,23 +219,23 @@ export function OpnamePage({
             <tbody>
               {shown.map((p) => {
                 const raw = fisik[p.id] ?? "";
-                const n = raw === "" ? null : Number.parseInt(raw, 10);
-                const selisih = n == null || !Number.isFinite(n) ? null : n - p.stock;
+                const n = raw === "" ? null : parseFisik(raw);
+                const selisih = n == null ? null : n - p.stock;
                 return (
                   <tr key={p.id} className="striped">
                     <td>
                       <b>{p.name}</b>
                       <div className="faint">{p.barcode} · {p.unit}</div>
                     </td>
-                    <td className="r tabular">{p.stock}</td>
+                    <td className="r tabular">{formatQty(p.stock)}</td>
                     <td className="r">
                       <input
                         className="field opname-qty"
-                        inputMode="numeric"
+                        inputMode="decimal"
                         placeholder="—"
                         value={raw}
                         onChange={(e) => {
-                          const v = e.target.value.replace(/\D/g, "");
+                          const v = e.target.value.replace(/[^\d.,]/g, "");
                           setFisik((prev) => ({ ...prev, [p.id]: v }));
                         }}
                       />

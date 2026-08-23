@@ -3,9 +3,11 @@ import type { StoreSettings, UserRole } from "@sklamini/shared";
 import { bluetoothSupported, scanBluetoothPrinters, type BtPrinter } from "../lib/bluetoothPrinters.ts";
 import { cashDrawerSupported, listWindowsPrinters, openCashDrawer, type WinPrinter } from "../lib/cashDrawer.ts";
 import { exportBackup, importBackup } from "../lib/db.ts";
+import { printTestStruk } from "../lib/print.ts";
 import { findProductByBarcode, listUsers, saveSettings, upsertUser, type Session } from "../lib/repo.ts";
 import { listScanners, scannerKindLabel, scannersSupported, type WinScanner } from "../lib/scanners.ts";
 import { scanBeep } from "../lib/beep.ts";
+import { useScanFocus } from "../lib/useScanFocus.ts";
 import { NAV, defaultMenus, type Page } from "../types.ts";
 import { Button, Field, H2, Select, Text } from "../ui/primitives.tsx";
 import { PageHeader } from "../components/PageHeader.tsx";
@@ -13,15 +15,15 @@ import { useToast } from "../ui/toast.tsx";
 
 type Section = "identitas" | "struk" | "printer" | "scanner" | "pembayaran" | "pajak" | "pengguna" | "data";
 
-const SECTIONS: { id: Section; label: string }[] = [
-  { id: "identitas", label: "Identitas toko" },
-  { id: "struk", label: "Struk & nota" },
-  { id: "printer", label: "Printer" },
-  { id: "scanner", label: "Scanner" },
-  { id: "pembayaran", label: "Pembayaran" },
-  { id: "pajak", label: "PPN" },
-  { id: "pengguna", label: "Pengguna & PIN" },
-  { id: "data", label: "Data" },
+const SECTIONS: { id: Section; label: string; hint: string }[] = [
+  { id: "identitas", label: "Identitas toko", hint: "Nama, alamat, dan logo di struk serta laporan." },
+  { id: "struk", label: "Struk & nota", hint: "Tulisan di bawah total struk dan nota." },
+  { id: "printer", label: "Printer", hint: "Sambungan, kertas, dan laci kasir." },
+  { id: "scanner", label: "Scanner", hint: "Pilih perangkat, lalu uji scan di kolom ini." },
+  { id: "pembayaran", label: "Pembayaran", hint: "Rekening hanya untuk pembayaran transfer." },
+  { id: "pajak", label: "PPN", hint: "Ditambah di keranjang, struk, dan nota." },
+  { id: "pengguna", label: "Pengguna & PIN", hint: "Setiap user punya PIN dan menu sendiri." },
+  { id: "data", label: "Data", hint: "Backup dan pulihkan database." },
 ];
 
 async function fileToLogo(file: File): Promise<string> {
@@ -96,9 +98,17 @@ export function PengaturanPage({
     toast.show("Backup diunduh", "ok", "Simpan file SQLite di tempat aman.");
   }
 
+  const current = SECTIONS.find((s) => s.id === section) ?? SECTIONS[0];
+
   return (
     <div className="settings-wrap">
-      <PageHeader page="pengaturan" title="Pengaturan" hint="Identitas toko, PPN, printer, pengguna, dan data." />
+      <PageHeader page="pengaturan" title="Pengaturan" hint={current.hint}>
+        {section !== "pengguna" ? (
+          <Button variant="primary" onClick={save}>
+            Simpan
+          </Button>
+        ) : null}
+      </PageHeader>
       <div className="settings-page">
         <nav className="settings-nav">
           {SECTIONS.map((s) => (
@@ -113,17 +123,9 @@ export function PengaturanPage({
           ))}
         </nav>
         <section className="settings-panel">
-          <header className="settings-panel-head">
-            <h3>{SECTIONS.find((s) => s.id === section)?.label}</h3>
-            {section !== "pengguna" ? (
-              <Button variant="primary" onClick={save}>
-                Simpan
-              </Button>
-            ) : null}
-          </header>
           <div className="settings-panel-body">
           {section === "identitas" ? (
-            <div className="stack settings-form">
+            <div className="settings-card">
               <div className="logo-pick">
                 {form.logoDataUrl ? (
                   <img src={form.logoDataUrl} alt="Logo toko" />
@@ -174,7 +176,7 @@ export function PengaturanPage({
             </div>
           ) : null}
           {section === "struk" ? (
-            <div className="stack settings-form">
+            <div className="settings-card">
               <label className="field-label">
                 <span>Footer struk / nota</span>
                 <Field
@@ -183,18 +185,17 @@ export function PengaturanPage({
                   placeholder="Terima kasih telah berbelanja"
                 />
               </label>
-              <p className="settings-note">Tampil di bawah total pada struk 58mm dan nota A4.</p>
             </div>
           ) : null}
           {section === "printer" ? <PrinterPanel form={form} set={set} /> : null}
           {section === "scanner" ? <ScannerPanel form={form} set={set} /> : null}
           {section === "pembayaran" ? (
-            <div className="stack settings-form">
-              <div className="grid grid-3">
-                <label className="field-label">
-                  <span>Bank</span>
-                  <Field value={form.bankName} onChange={(e) => set("bankName", e.target.value)} />
-                </label>
+            <div className="settings-card">
+              <label className="field-label">
+                <span>Bank</span>
+                <Field value={form.bankName} onChange={(e) => set("bankName", e.target.value)} />
+              </label>
+              <div className="settings-addr">
                 <label className="field-label">
                   <span>Nomor rekening</span>
                   <Field value={form.bankAccount} onChange={(e) => set("bankAccount", e.target.value)} />
@@ -204,11 +205,10 @@ export function PengaturanPage({
                   <Field value={form.bankHolder} onChange={(e) => set("bankHolder", e.target.value)} />
                 </label>
               </div>
-              <p className="settings-note">Hanya untuk bayar transfer. Tunai, QRIS, dan kartu tidak memakai rekening ini.</p>
             </div>
           ) : null}
           {section === "pajak" ? (
-            <div className="stack settings-form">
+            <div className="settings-card">
               <div className="switch-row">
                 <div>
                   <b>PPN</b>
@@ -245,26 +245,7 @@ export function PengaturanPage({
             <UsersSection session={session} onSessionChange={onSessionChange} />
           ) : null}
           {section === "data" ? (
-            <div className="stack settings-form">
-              <label className="field-label">
-                <span>URL API</span>
-                <Field
-                  value={form.apiUrl}
-                  onChange={(e) => set("apiUrl", e.target.value)}
-                  placeholder="http://127.0.0.1:8787"
-                />
-              </label>
-              <label className="field-label">
-                <span>Token API</span>
-                <Field
-                  value={form.apiToken}
-                  onChange={(e) => set("apiToken", e.target.value)}
-                  placeholder="Sama dengan API_TOKEN di server"
-                />
-              </label>
-              <p className="settings-note">
-                Token wajib jika server memakai API_TOKEN. Sync hanya mengirim data yang diterima server.
-              </p>
+            <div className="settings-card">
               <div className="settings-data">
                 <div>
                   <b>Backup database</b>
@@ -311,6 +292,7 @@ function ScannerPanel({
   const [devices, setDevices] = useState<WinScanner[]>([]);
   const [busy, setBusy] = useState(false);
   const [test, setTest] = useState("");
+  const { ref: scanRef, focus: focusScan } = useScanFocus(true, { restoreOnWindowFocus: true });
 
   async function refresh(showToast = false) {
     setBusy(true);
@@ -348,7 +330,7 @@ function ScannerPanel({
   }
 
   return (
-    <div className="stack settings-form">
+    <div className="settings-card">
       <div className="settings-split">
         <label className="field-label">
           <span>Scanner barcode</span>
@@ -371,6 +353,7 @@ function ScannerPanel({
       <label className="field-label">
         <span>Uji scan</span>
         <Field
+          ref={scanRef}
           value={test}
           placeholder="Arahkan scanner ke kolom ini"
           onChange={(e) => {
@@ -380,6 +363,7 @@ function ScannerPanel({
               scanBeep();
               setTest("");
               toast.show(hit.name, "ok", `${hit.barcode} ketemu`);
+              focusScan(true);
               return;
             }
             setTest(v);
@@ -387,7 +371,7 @@ function ScannerPanel({
         />
       </label>
       <p className="settings-note">
-        Langsung masuk di Kasir dan Restock, tanpa Enter.
+        Scan langsung masuk di Kasir dan Restock, tanpa Enter.
         {scannersSupported()
           ? " USB dan Bluetooth yang sudah dipasangkan di Windows ikut terdaftar."
           : " Daftar perangkat hanya di aplikasi Windows."}
@@ -408,6 +392,7 @@ function PrinterPanel({
   const [scanning, setScanning] = useState(false);
   const [winPrinters, setWinPrinters] = useState<WinPrinter[]>([]);
   const [testingDrawer, setTestingDrawer] = useState(false);
+  const [testingPrint, setTestingPrint] = useState(false);
   const bt = form.printerConnection === "bluetooth";
 
   useEffect(() => {
@@ -458,6 +443,26 @@ function PrinterPanel({
     if (p.id.startsWith("prn:")) set("printerWinName", p.name);
   }
 
+  async function testPrint() {
+    setTestingPrint(true);
+    try {
+      const ok = await printTestStruk(form);
+      if (ok) {
+        toast.show("Struk tes terkirim", "ok", "Cek printer thermal. Pastikan logo toko sudah diunggah di Identitas.");
+      } else {
+        toast.show(
+          "Gagal cetak tes",
+          "error",
+          "Pilih printer thermal di Printer Windows, lalu coba lagi.",
+        );
+      }
+    } catch (e) {
+      toast.show("Gagal cetak tes", "error", e instanceof Error ? e.message : "Coba pilih printer, lalu Simpan.");
+    } finally {
+      setTestingPrint(false);
+    }
+  }
+
   async function testDrawer() {
     setTestingDrawer(true);
     try {
@@ -471,7 +476,7 @@ function PrinterPanel({
   }
 
   return (
-    <div className="stack settings-form">
+    <div className="settings-card wide">
       <label className="field-label">
         <span>Sambungan</span>
         <div className="conn-seg" role="group" aria-label="Sambungan printer">
@@ -549,27 +554,30 @@ function PrinterPanel({
           </Select>
         </label>
       </div>
-      <div className="settings-split">
-        <label className="field-label">
-          <span>Setelah transaksi</span>
-          <Select
-            value={form.autoPrint}
-            onChange={(e) => set("autoPrint", e.target.value as StoreSettings["autoPrint"])}
-          >
-            <option value="ask">Tanya dulu</option>
-            <option value="58mm">Cetak struk</option>
-            <option value="A4">Cetak nota A4</option>
-            <option value="both">Struk dan nota</option>
-            <option value="skip">Jangan cetak</option>
-          </Select>
-        </label>
+      <label className="field-label">
+        <span>Setelah transaksi</span>
+        <Select
+          value={form.autoPrint}
+          onChange={(e) => set("autoPrint", e.target.value as StoreSettings["autoPrint"])}
+        >
+          <option value="58mm">Cetak struk langsung</option>
+          <option value="A4">Cetak nota A4</option>
+          <option value="both">Struk dan nota</option>
+          <option value="skip">Jangan cetak</option>
+        </Select>
+      </label>
+      <div className="row wrap">
+        <Button variant="primary" disabled={testingPrint} onClick={() => void testPrint()}>
+          {testingPrint ? "Mencetak…" : "Uji cetak struk"}
+        </Button>
         <Button disabled={testingDrawer} onClick={() => void testDrawer()}>
           {testingDrawer ? "Mengirim…" : "Uji buka laci"}
         </Button>
       </div>
       <p className="settings-note">
-        Laci kasir terbuka otomatis lewat printer struk (kabel RJ11).
-        {!cashDrawerSupported() ? " Buka aplikasi Windows agar perintah laci terkirim." : ""}
+        Struk 58mm dikirim langsung ke printer thermal, tanpa jendela cetak Windows.
+        Pilih printer di atas. Laci kasir terbuka otomatis lewat printer struk (kabel RJ11).
+        {!cashDrawerSupported() ? " Buka aplikasi Windows agar perintah laci dan cetak langsung terkirim." : ""}
       </p>
     </div>
   );
@@ -649,12 +657,12 @@ function UsersSection({
   }
 
   return (
-    <div className="stack">
-      <div className="row">
-        <p className="settings-note" style={{ margin: 0 }}>
-          Setiap user punya PIN dan menu sendiri.
-        </p>
-        <span className="grow" />
+    <div className="settings-card wide settings-users">
+      <div className="settings-card-head">
+        <div>
+          <b>Daftar user</b>
+          <span>Klik baris untuk mengubah PIN atau menu.</span>
+        </div>
         <Button variant="primary" onClick={startNew}>
           Tambah user
         </Button>

@@ -47,6 +47,15 @@ export function NavGlyph({ page }: { page: Page }) {
       </svg>
     );
   }
+  if (page === "member") {
+    return (
+      <svg {...common}>
+        <circle cx="12" cy="8" r="3" />
+        <path d="M5.8 19c1.2-3.1 3.6-4.6 6.2-4.6S17 15.9 18.2 19" />
+        <path d="M17 8.2h4M19 6.2v4" />
+      </svg>
+    );
+  }
   if (page === "retur") {
     return (
       <svg {...common}>
@@ -86,15 +95,6 @@ export function NavGlyph({ page }: { page: Page }) {
         <rect x="3" y="6" width="18" height="12" rx="2" />
         <path d="M3 10h18" />
         <path d="M8 14h3" />
-      </svg>
-    );
-  }
-  if (page === "pelanggan") {
-    return (
-      <svg {...common}>
-        <circle cx="12" cy="8" r="3" />
-        <path d="M5 19c1.5-3 4-4.5 7-4.5S17.5 16 19 19" />
-        <path d="M17 11h4M19 9v4" />
       </svg>
     );
   }

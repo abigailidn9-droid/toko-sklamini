@@ -1,21 +1,49 @@
 import { useMemo, useState } from "react";
 import {
   formatDateId,
+  inIsoRange,
+  monthStartIso,
   ppnLabel,
   rp,
   saleMethodLabel,
   todayIso,
   type Sale,
 } from "@sklamini/shared";
-import { Button, Callout, H2, PinDots, PinPad, Text } from "../ui/primitives.tsx";
+import { Button, Callout, Field, H2, PinDots, PinPad, Text } from "../ui/primitives.tsx";
 import { PageShell } from "../components/PageHeader.tsx";
-import { getSale, listSales, ownerPinOk, uniqueDates, voidSale } from "../lib/repo.ts";
-import { printNota, printStruk } from "../lib/print.ts";
+import { getSale, listSales, ownerPinOk, voidSale } from "../lib/repo.ts";
+import { printNota, printStruk, saleChange } from "../lib/print.ts";
 import type { StoreSettings } from "@sklamini/shared";
 import { useToast } from "../ui/toast.tsx";
+import { useScanFocus } from "../lib/useScanFocus.ts";
+
+type RangeMode = "hari" | "7hari" | "bulan" | "custom";
+
+function daysAgoIso(n: number): string {
+  const d = new Date();
+  d.setDate(d.getDate() - n);
+  return todayIso(d);
+}
+
+function rangeOf(mode: RangeMode, from: string, to: string) {
+  const today = todayIso();
+  if (mode === "hari") return { from: today, to: today };
+  if (mode === "7hari") return { from: daysAgoIso(6), to: today };
+  if (mode === "bulan") return { from: monthStartIso(), to: today };
+  return from <= to ? { from, to } : { from: to, to: from };
+}
 
 function statusLabel(s: Sale["status"]) {
   return s === "void" ? "Dibatalkan" : "Selesai";
+}
+
+function saleMatches(sale: Sale, raw: string) {
+  const q = raw.trim().toLowerCase();
+  if (!q) return true;
+  if (sale.localNo.toLowerCase().includes(q)) return true;
+  return sale.items.some(
+    (it) => it.name.toLowerCase().includes(q) || it.barcode.toLowerCase().includes(q),
+  );
 }
 
 export function RiwayatPage({
@@ -29,38 +57,122 @@ export function RiwayatPage({
   onChange: () => void;
   onRetur: (saleId: string) => void;
 }) {
-  const dates = useMemo(() => uniqueDates("sales"), [tick]);
-  const [date, setDate] = useState<string>(todayIso());
-  const sales = useMemo(
-    () => listSales(date === "all" || !date ? "all" : date),
-    [tick, date],
-  );
+  const [mode, setMode] = useState<RangeMode>("hari");
+  const [customFrom, setCustomFrom] = useState(todayIso());
+  const [customTo, setCustomTo] = useState(todayIso());
+  const range = useMemo(() => rangeOf(mode, customFrom, customTo), [mode, customFrom, customTo]);
+  const [q, setQ] = useState("");
+  const [cari, setCari] = useState("");
+  const sales = useMemo(() => {
+    const all = listSales("all");
+    if (cari.trim()) return all.filter((s) => saleMatches(s, cari));
+    return all.filter((s) => inIsoRange(s.createdAt, range.from, range.to));
+  }, [tick, range, cari]);
+  const shown = sales;
   const [openId, setOpenId] = useState<string | null>(null);
   const sale = openId ? getSale(openId) : null;
-  const omzet = sales.filter((s) => s.status === "selesai").reduce((n, s) => n + s.total, 0);
+  const { ref: scanRef } = useScanFocus(!openId);
+  const omzet = shown.filter((s) => s.status === "selesai").reduce((n, s) => n + s.total, 0);
+  const searching = Boolean(cari.trim());
+  const multiDay = searching || range.from !== range.to;
+  const periode = searching
+    ? `Pencarian “${cari.trim()}”`
+    : range.from === range.to
+      ? formatDateId(range.from)
+      : `${formatDateId(range.from)} – ${formatDateId(range.to)}`;
 
   return (
     <PageShell
       page="riwayat"
       title="Riwayat transaksi"
-      hint="Nota penjualan hari ini dan sebelumnya."
+      hint="Nota penjualan per periode."
       actions={
-        <select className="field" value={date} onChange={(e) => setDate(e.target.value)}>
-          <option value="all">Semua tanggal</option>
-          {dates.map((d) => (
-            <option key={d} value={d}>
-              {formatDateId(d)}
-            </option>
-          ))}
-        </select>
+        <>
+          <div className="tabs">
+            <button className={`tab ${mode === "hari" ? "on" : ""}`} type="button" onClick={() => setMode("hari")}>
+              Hari ini
+            </button>
+            <button className={`tab ${mode === "7hari" ? "on" : ""}`} type="button" onClick={() => setMode("7hari")}>
+              7 hari
+            </button>
+            <button className={`tab ${mode === "bulan" ? "on" : ""}`} type="button" onClick={() => setMode("bulan")}>
+              Bulan ini
+            </button>
+            <button
+              className={`tab ${mode === "custom" ? "on" : ""}`}
+              type="button"
+              onClick={() => {
+                setCustomFrom(range.from);
+                setCustomTo(range.to);
+                setMode("custom");
+              }}
+            >
+              Custom
+            </button>
+          </div>
+          {mode === "custom" ? (
+            <div className="period-range">
+              <input
+                className="field"
+                type="date"
+                value={customFrom}
+                max={customTo}
+                onChange={(e) => setCustomFrom(e.target.value || todayIso())}
+              />
+              <span>s.d.</span>
+              <input
+                className="field"
+                type="date"
+                value={customTo}
+                min={customFrom}
+                onChange={(e) => setCustomTo(e.target.value || todayIso())}
+              />
+            </div>
+          ) : null}
+        </>
       }
     >
-      <div className="pay-total">
-        <span>Omzet</span>
-        <b className="tabular">{rp(omzet)}</b>
+      <div className="riwayat-toolbar">
+        <div className="pay-total">
+          <span>Omzet · {periode}</span>
+          <b className="tabular">{rp(omzet)}</b>
+        </div>
+        <form
+          className="riwayat-search"
+          onSubmit={(e) => {
+            e.preventDefault();
+            setCari(q);
+          }}
+        >
+          <Field
+            ref={scanRef}
+            value={q}
+            placeholder="Nomor nota atau nama produk…"
+            onChange={(e) => setQ(e.target.value)}
+          />
+          <Button type="submit" variant="primary">
+            Cari
+          </Button>
+          {cari ? (
+            <Button
+              type="button"
+              variant="ghost"
+              onClick={() => {
+                setQ("");
+                setCari("");
+              }}
+            >
+              Reset
+            </Button>
+          ) : null}
+        </form>
       </div>
-      {sales.length === 0 ? (
-        <Callout title="Belum ada transaksi">Penjualan hari ini akan muncul di sini.</Callout>
+      {shown.length === 0 ? (
+        <Callout title={searching ? "Tidak ketemu" : "Belum ada transaksi"}>
+          {searching
+            ? "Tidak ada nota atau produk yang cocok. Coba nomor nota atau nama barang lain."
+            : "Tidak ada nota di periode ini."}
+        </Callout>
       ) : (
         <table className="data">
           <thead>
@@ -74,10 +186,19 @@ export function RiwayatPage({
             </tr>
           </thead>
           <tbody>
-            {sales.map((s) => (
+            {shown.map((s) => (
               <tr key={s.id} className="clickable striped" onClick={() => setOpenId(s.id)}>
                 <td><b>{s.localNo}</b></td>
-                <td>{new Date(s.createdAt).toLocaleTimeString("id-ID", { hour: "2-digit", minute: "2-digit" })}</td>
+                <td>
+                  {multiDay
+                    ? new Date(s.createdAt).toLocaleString("id-ID", {
+                        day: "numeric",
+                        month: "short",
+                        hour: "2-digit",
+                        minute: "2-digit",
+                      })
+                    : new Date(s.createdAt).toLocaleTimeString("id-ID", { hour: "2-digit", minute: "2-digit" })}
+                </td>
                 <td>{s.cashierName}</td>
                 <td>{saleMethodLabel(s)}</td>
                 <td className="r tabular">{rp(s.total)}</td>
@@ -143,6 +264,8 @@ function SaleDetail({
       toast.show("Tidak bisa void", "error", e instanceof Error ? e.message : "Coba retur barang.");
     }
   }
+
+  const kembali = saleChange(sale);
 
   return (
     <>
@@ -230,10 +353,12 @@ function SaleDetail({
               <span>Bayar</span>
               <b className="tabular">{rp(sale.paid)}</b>
             </div>
-            <div className="sale-sum-row">
-              <span>Kembali</span>
-              <b className="tabular">{rp(sale.changeAmount)}</b>
-            </div>
+            {kembali > 0 ? (
+              <div className="sale-sum-row">
+                <span>Kembali</span>
+                <b className="tabular">{rp(kembali)}</b>
+              </div>
+            ) : null}
           </div>
           <div className="detail-actions">
             <Button onClick={() => printStruk(sale, settings)}>Cetak struk 58mm</Button>

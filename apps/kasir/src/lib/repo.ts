@@ -16,8 +16,6 @@ import {
   inIsoRange,
   type CartLine,
   type CartSnapshot,
-  type Customer,
-  type CustomerPayment,
   type Draft,
   type Employee,
   type Expense,
@@ -30,6 +28,11 @@ import {
   type SaleReturn,
   type SaleReturnItem,
   type StockIn,
+  type Member,
+  type MemberFee,
+  type MemberReward,
+  MEMBER_FEE,
+  MEMBER_VISIT_GOAL,
   type StoreSettings,
   type UserRole,
   type CashShift,
@@ -37,7 +40,8 @@ import {
   type OpnameItem,
 } from "@sklamini/shared";
 import { all, one, run, tx } from "./db.ts";
-import { defaultMenus, parseMenus, type Page } from "../types.ts";
+import { CLOUD_API_TOKEN, CLOUD_API_URL } from "./cloud.ts";
+import { defaultMenus, parseMenus, NAV, type Page } from "../types.ts";
 
 export type Session = {
   id: string;
@@ -220,10 +224,22 @@ export async function backfillUserPins(): Promise<void> {
   );
   if (!rows.length) return;
   const known = ["123456", "111111", "222222"];
-  const hashes = await Promise.all(known.map(async (p) => ({ p, h: await hashPin(p) })));
+  const hashes = await Promise.all(known.map((p) => hashPin(p).then((h) => ({ p, h }))));
   for (const row of rows) {
     const hit = hashes.find((x) => x.h === row.pin_hash);
     if (hit) run(`UPDATE users SET pin = ? WHERE id = ?`, [hit.p, row.id]);
+  }
+}
+
+/** Menu Member ditambahkan ke user lama tanpa harus atur ulang PIN. */
+export function ensureMemberMenu(): void {
+  const rows = all<{ id: string; menus: string; role: UserRole }>(`SELECT id, menus, role FROM users`);
+  for (const row of rows) {
+    const menus = parseMenus(row.menus, row.role);
+    if (menus.includes("member")) continue;
+    const next = [...new Set([...menus, "member" as Page])];
+    const ordered = NAV.map((n) => n.id).filter((id) => next.includes(id));
+    run(`UPDATE users SET menus = ? WHERE id = ?`, [JSON.stringify(ordered), row.id]);
   }
 }
 
@@ -263,6 +279,170 @@ export function getProduct(id: string): Product | null {
   return row ? mapProduct(row) : null;
 }
 
+function digitsPhone(raw: string): string {
+  return raw.replace(/\D/g, "");
+}
+
+function mapMember(r: { id: string; name: string; phone: string; active: number; updated_at: string }): Member {
+  return {
+    id: r.id,
+    name: r.name,
+    phone: r.phone,
+    active: r.active === 1,
+    updatedAt: r.updated_at,
+  };
+}
+
+export function listMembers(includeInactive = false): Member[] {
+  const sql = includeInactive
+    ? `SELECT id, name, phone, active, updated_at FROM customers ORDER BY name`
+    : `SELECT id, name, phone, active, updated_at FROM customers WHERE active = 1 ORDER BY name`;
+  return all<{ id: string; name: string; phone: string; active: number; updated_at: string }>(sql).map(mapMember);
+}
+
+export function getMember(id: string): Member | null {
+  const row = one<{ id: string; name: string; phone: string; active: number; updated_at: string }>(
+    `SELECT id, name, phone, active, updated_at FROM customers WHERE id = ?`,
+    [id],
+  );
+  return row ? mapMember(row) : null;
+}
+
+export function memberVisitCount(memberId: string): number {
+  return (
+    one<{ n: number }>(
+      `SELECT COUNT(*) AS n FROM sales WHERE customer_id = ? AND status = 'selesai'`,
+      [memberId],
+    )?.n ?? 0
+  );
+}
+
+export function memberRewardsOf(memberId: string): MemberReward[] {
+  return all<{
+    id: string;
+    customer_id: string;
+    visits: number;
+    created_at: string;
+    cashier_id: string;
+    cashier_name: string;
+  }>(`SELECT * FROM member_rewards WHERE customer_id = ? ORDER BY created_at DESC`, [memberId]).map((r) => ({
+    id: r.id,
+    memberId: r.customer_id,
+    visits: r.visits,
+    createdAt: r.created_at,
+    cashierId: r.cashier_id,
+    cashierName: r.cashier_name,
+  }));
+}
+
+export function memberPendingRewards(memberId: string): number {
+  const visits = memberVisitCount(memberId);
+  const got = memberRewardsOf(memberId).length;
+  return Math.max(0, Math.floor(visits / MEMBER_VISIT_GOAL) - got);
+}
+
+export function memberSales(memberId: string): Sale[] {
+  return all<SaleRow>(
+    `SELECT * FROM sales WHERE customer_id = ? ORDER BY created_at DESC`,
+    [memberId],
+  ).map(mapSale);
+}
+
+export function listMemberFees(): MemberFee[] {
+  return all<{
+    id: string;
+    customer_id: string;
+    amount: number;
+    method: string;
+    created_at: string;
+    cashier_id: string;
+    cashier_name: string;
+  }>(
+    `SELECT id, customer_id, amount, method, created_at, cashier_id, cashier_name
+     FROM customer_payments WHERE note = 'Pendaftaran member' ORDER BY created_at DESC`,
+  ).map((r) => ({
+    id: r.id,
+    memberId: r.customer_id,
+    amount: r.amount,
+    method: asPayMethod(r.method),
+    createdAt: r.created_at,
+    cashierId: r.cashier_id,
+    cashierName: r.cashier_name,
+  }));
+}
+
+export function registerMember(input: {
+  name: string;
+  phone: string;
+  method: PayMethod;
+  cashier: Session;
+}): { ok: true; member: Member } | { ok: false; error: string } {
+  if (!currentOpenShift()) {
+    return { ok: false, error: "Buka kasir dulu sebelum daftar member." };
+  }
+  const name = input.name.trim();
+  const phone = digitsPhone(input.phone);
+  if (!name) return { ok: false, error: "Nama wajib diisi" };
+  if (phone.length < 8) return { ok: false, error: "Nomor telepon tidak valid" };
+  const clash = one<{ id: string }>(`SELECT id FROM customers WHERE phone = ?`, [phone]);
+  if (clash) return { ok: false, error: "Nomor telepon sudah terdaftar" };
+  const now = new Date().toISOString();
+  const id = newId();
+  const feeId = newId();
+  const member: Member = { id, name, phone, active: true, updatedAt: now };
+  tx(() => {
+    run(
+      `INSERT INTO customers (id, name, phone, note, active, updated_at) VALUES (?, ?, ?, '', 1, ?)`,
+      [id, name, phone, now],
+    );
+    run(
+      `INSERT INTO customer_payments (id, customer_id, amount, method, note, created_at, cashier_id, cashier_name)
+       VALUES (?, ?, ?, ?, 'Pendaftaran member', ?, ?, ?)`,
+      [feeId, id, MEMBER_FEE, input.method, now, input.cashier.id, input.cashier.name],
+    );
+    enqueue("customer", member);
+    enqueue("customer_payment", {
+      id: feeId,
+      customerId: id,
+      amount: MEMBER_FEE,
+      method: input.method,
+      note: "Pendaftaran member",
+      createdAt: now,
+      cashierId: input.cashier.id,
+      cashierName: input.cashier.name,
+    });
+  });
+  return { ok: true, member };
+}
+
+export function redeemMemberReward(input: {
+  memberId: string;
+  cashier: Session;
+}): { ok: true } | { ok: false; error: string } {
+  const member = getMember(input.memberId);
+  if (!member) return { ok: false, error: "Member tidak ditemukan" };
+  if (memberPendingRewards(input.memberId) <= 0) {
+    return { ok: false, error: `Belum mencapai ${MEMBER_VISIT_GOAL} kali belanja` };
+  }
+  const now = new Date().toISOString();
+  const visits = memberVisitCount(input.memberId);
+  const row: MemberReward = {
+    id: newId(),
+    memberId: input.memberId,
+    visits,
+    createdAt: now,
+    cashierId: input.cashier.id,
+    cashierName: input.cashier.name,
+  };
+  run(
+    `INSERT INTO member_rewards (id, customer_id, visits, created_at, cashier_id, cashier_name)
+     VALUES (?, ?, ?, ?, ?, ?)`,
+    [row.id, row.memberId, row.visits, row.createdAt, row.cashierId, row.cashierName],
+  );
+  enqueue("member_reward", row);
+  return { ok: true };
+}
+
 export function upsertProduct(input: {
   id?: string;
   barcode: string;
@@ -272,6 +452,8 @@ export function upsertProduct(input: {
   buyPrice: number;
   sellPrice: number;
   active?: boolean;
+  upsertByBarcode?: boolean;
+  openingQty?: number;
 }): { ok: true; id: string } | { ok: false; error: string } {
   const barcode = input.barcode.trim();
   const name = input.name.trim();
@@ -313,6 +495,10 @@ export function upsertProduct(input: {
     return { ok: true, id: input.id };
   }
 
+  if (byBarcode && !input.upsertByBarcode) {
+    return { ok: false, error: "Barcode sudah dipakai produk lain" };
+  }
+
   const id = byBarcode?.id ?? newId();
   if (byBarcode) {
     run(
@@ -346,15 +532,67 @@ export function upsertProduct(input: {
     active: input.active !== false,
     updatedAt: now,
   });
+  const openingQty = !input.id && !byBarcode ? roundQty(input.openingQty ?? 0) : 0;
+  if (openingQty > 0) {
+    const ev = {
+      id: newId(),
+      productId: id,
+      type: "adjust" as const,
+      qty: openingQty,
+      refId: id,
+      deviceId: deviceId(),
+      createdAt: now,
+    };
+    run(
+      `INSERT INTO stock_events (id, product_id, type, qty, ref_id, device_id, created_at)
+       VALUES (?, ?, ?, ?, ?, ?, ?)`,
+      [ev.id, ev.productId, ev.type, ev.qty, ev.refId, ev.deviceId, ev.createdAt],
+    );
+    enqueue("stock_in", {
+      doc: {
+        id: ev.id,
+        localNo: `AWL-${id.slice(0, 8)}`,
+        cashierId: "local",
+        cashierName: "Stok awal",
+        createdAt: now,
+      },
+      items: [
+        {
+          id: newId(),
+          stockInId: ev.id,
+          productId: id,
+          barcode,
+          name,
+          qty: openingQty,
+          buyPrice: input.buyPrice,
+        },
+      ],
+      events: [ev],
+    });
+  }
   return { ok: true, id };
 }
 
 export function nextLocalNo(prefix: string, table: "sales" | "stock_ins" | "returns" | "opnames"): string {
   const today = todayIso();
-  const n = all<{ created_at: string }>(`SELECT created_at FROM ${table}`).filter(
-    (r) => localDayFromIso(r.created_at) === today,
-  ).length;
-  return localNo(prefix, n + 1);
+  let max = 0;
+  for (const r of all<{ local_no: string; created_at: string }>(`SELECT local_no, created_at FROM ${table}`)) {
+    if (localDayFromIso(r.created_at) !== today) continue;
+    const n = Number(r.local_no.split("-").pop());
+    if (Number.isFinite(n) && n > max) max = n;
+  }
+  return localNo(prefix, max + 1);
+}
+
+function tunaiShare(sale: Sale): number {
+  const tunai = sale.payments.filter((p) => p.method === "tunai").reduce((n, p) => n + p.amount, 0);
+  if (sale.total <= 0) return tunai > 0 ? 1 : 0;
+  return Math.min(1, tunai / sale.total);
+}
+
+function tunaiOutForReturn(total: number, sale: Sale | null): number {
+  if (!sale) return 0;
+  return Math.round(total * tunaiShare(sale));
 }
 
 export function checkout(input: {
@@ -398,18 +636,15 @@ export function checkout(input: {
   const payList = paymentsIn.length ? paymentsIn : [{ method: input.method, amount: total }];
   const paySum = payList.reduce((n, p) => n + p.amount, 0);
   if (paySum !== total) throw new Error("Jumlah pembayaran harus sama dengan total");
-  const hutangAmt = payList.filter((p) => p.method === "hutang").reduce((n, p) => n + p.amount, 0);
-  const customerId = input.customerId?.trim() || null;
-  if (hutangAmt > 0 && !customerId) throw new Error("Pilih pelanggan untuk hutang");
-  if (customerId && !getCustomer(customerId)) throw new Error("Pelanggan tidak ditemukan");
   const tunaiNeed = payList.filter((p) => p.method === "tunai").reduce((n, p) => n + p.amount, 0);
+  const method = payList.slice().sort((a, b) => b.amount - a.amount)[0]?.method ?? input.method;
   const paid = tunaiNeed > 0 ? input.paid : total;
   if (tunaiNeed > 0 && paid < tunaiNeed) throw new Error("Uang tunai kurang");
   const now = new Date().toISOString();
   const id = newId();
   const local = nextLocalNo("SKL", "sales");
-  const changeAmount = Math.max(0, paid - tunaiNeed);
-  const method = payList.slice().sort((a, b) => b.amount - a.amount)[0]?.method ?? input.method;
+  const changeAmount = method === "tunai" && tunaiNeed > 0 ? Math.max(0, paid - tunaiNeed) : 0;
+  const customerId = input.customerId?.trim() || null;
   const items: SaleItem[] = input.lines.map((l) => ({
     id: newId(),
     saleId: id,
@@ -435,8 +670,6 @@ export function checkout(input: {
     deviceId: deviceId(),
     createdAt: now,
   }));
-  const customerName = customerId ? (getCustomer(customerId)?.name ?? "") : "";
-
   tx(() => {
     run(
       `INSERT INTO sales (id, local_no, cashier_id, cashier_name, customer_id, method, subtotal, discount, delivery_cost, ppn, ppn_rate, note, total, paid, change_amount, status, created_at, voided_at)
@@ -515,7 +748,6 @@ export function checkout(input: {
     cashierId: input.cashier.id,
     cashierName: input.cashier.name,
     customerId,
-    customerName,
     method,
     subtotal,
     discount,
@@ -542,11 +774,16 @@ function saleItemsOf(saleId: string): SaleItem[] {
   );
 }
 
+function asPayMethod(raw: string): PayMethod {
+  if (raw === "qris" || raw === "transfer" || raw === "kartu") return raw;
+  return "tunai";
+}
+
 function paymentsOf(saleId: string): SalePayment[] {
-  return all<SalePayment>(
+  return all<{ id: string; saleId: string; method: string; amount: number }>(
     `SELECT id, sale_id AS saleId, method, amount FROM sale_payments WHERE sale_id = ?`,
     [saleId],
-  );
+  ).map((p) => ({ ...p, method: asPayMethod(p.method) }));
 }
 
 type SaleRow = {
@@ -555,7 +792,7 @@ type SaleRow = {
   cashier_id: string;
   cashier_name: string;
   customer_id?: string | null;
-  method: PayMethod;
+  method: string;
   subtotal: number;
   discount: number;
   delivery_cost?: number;
@@ -572,18 +809,13 @@ type SaleRow = {
 
 function mapSale(r: SaleRow): Sale {
   const payments = paymentsOf(r.id);
-  const customerId = r.customer_id ?? null;
-  const customerName = customerId
-    ? (one<{ name: string }>(`SELECT name FROM customers WHERE id = ?`, [customerId])?.name ?? "")
-    : "";
   return {
     id: r.id,
     localNo: r.local_no,
     cashierId: r.cashier_id,
     cashierName: r.cashier_name,
-    customerId,
-    customerName,
-    method: r.method,
+    customerId: r.customer_id ?? null,
+    method: asPayMethod(r.method),
     subtotal: r.subtotal,
     discount: r.discount ?? 0,
     deliveryCost: r.delivery_cost ?? 0,
@@ -599,7 +831,7 @@ function mapSale(r: SaleRow): Sale {
     items: saleItemsOf(r.id),
     payments: payments.length
       ? payments
-      : [{ id: "", saleId: r.id, method: r.method, amount: r.total }],
+      : [{ id: "", saleId: r.id, method: asPayMethod(r.method), amount: r.total }],
   };
 }
 
@@ -815,15 +1047,15 @@ export function expectedDrawer(fromIso: string, toIso?: string): number {
     .filter((s) => s.status === "void" && (s.voidedAt ?? s.createdAt) >= fromIso && (s.voidedAt ?? s.createdAt) <= to)
     .reduce((n, s) => n + s.payments.filter((p) => p.method === "tunai").reduce((m, p) => m + p.amount, 0), 0);
   const tunaiRetur = listReturns()
-    .filter((r) => r.createdAt >= fromIso && r.createdAt <= to && r.method === "tunai")
-    .reduce((n, r) => n + r.total, 0);
+    .filter((r) => r.createdAt >= fromIso && r.createdAt <= to)
+    .reduce((n, r) => n + tunaiOutForReturn(r.total, getSale(r.saleId)), 0);
   const keluar = listExpenses()
     .filter((e) => e.createdAt >= fromIso && e.createdAt <= to)
     .reduce((n, e) => n + e.amount, 0);
-  const pelunasan = listCustomerPayments()
-    .filter((p) => p.createdAt >= fromIso && p.createdAt <= to && p.method === "tunai")
-    .reduce((n, p) => n + p.amount, 0);
-  return tunaiIn - tunaiVoid - tunaiRetur - keluar + pelunasan;
+  const memberTunai = listMemberFees()
+    .filter((f) => f.createdAt >= fromIso && f.createdAt <= to && f.method === "tunai")
+    .reduce((n, f) => n + f.amount, 0);
+  return tunaiIn + memberTunai - tunaiVoid - tunaiRetur - keluar;
 }
 
 export function shiftExpected(shift: CashShift): number {
@@ -1004,7 +1236,7 @@ export function listReturns(): SaleReturn[] {
     sale_id: string;
     cashier_id: string;
     cashier_name: string;
-    method: PayMethod;
+    method: string;
     total: number;
     note: string;
     created_at: string;
@@ -1014,7 +1246,7 @@ export function listReturns(): SaleReturn[] {
     saleId: r.sale_id,
     cashierId: r.cashier_id,
     cashierName: r.cashier_name,
-    method: r.method,
+    method: asPayMethod(r.method),
     total: r.total,
     note: r.note ?? "",
     createdAt: r.created_at,
@@ -1075,15 +1307,9 @@ export function createReturn(input: {
   const allBack = sale.items.every((it) => roundQty(after[it.id] ?? 0) + 1e-9 >= it.qty);
   const merchandise = items.reduce((n, it) => n + lineRefund(sale, it.sellPrice, it.qty), 0);
   const total = merchandise + (allBack ? sale.deliveryCost : 0);
-  const hutangOnSale = sale.payments.filter((p) => p.method === "hutang").reduce((n, p) => n + p.amount, 0);
-  const hutangRetur = listReturns()
-    .filter((r) => r.saleId === sale.id && r.method === "hutang")
-    .reduce((n, r) => n + r.total, 0);
-  const remainingHutang = Math.max(0, hutangOnSale - hutangRetur);
-  let method: PayMethod = sale.method;
-  if (remainingHutang >= total && total > 0) method = "hutang";
-  else if (sale.payments.some((p) => p.method === "tunai" && p.amount > 0)) method = "tunai";
-  else method = sale.payments.find((p) => p.method !== "hutang")?.method ?? sale.method;
+  const method: PayMethod = sale.payments.some((p) => p.method === "tunai" && p.amount > 0)
+    ? "tunai"
+    : (sale.payments[0]?.method ?? sale.method);
   const now = new Date().toISOString();
   const id = newId();
   const local = nextLocalNo("RTR", "returns");
@@ -1511,17 +1737,33 @@ export function attendanceToday(): AttendanceRow[] {
   });
 }
 
+function withCloud(s: StoreSettings): StoreSettings {
+  return { ...s, apiUrl: CLOUD_API_URL, apiToken: CLOUD_API_TOKEN };
+}
+
 export function loadSettings(): StoreSettings {
   const row = one<{ value: string }>(`SELECT value FROM settings WHERE key = 'store'`);
-  if (!row) return { ...DEFAULT_SETTINGS };
-  return { ...DEFAULT_SETTINGS, ...(JSON.parse(row.value) as Partial<StoreSettings>) };
+  if (!row) return withCloud({ ...DEFAULT_SETTINGS });
+  const s = { ...DEFAULT_SETTINGS, ...(JSON.parse(row.value) as Partial<StoreSettings>) };
+  if (s.autoPrint === "ask") s.autoPrint = "58mm";
+  return withCloud(s);
 }
 
 export function saveSettings(s: StoreSettings): void {
+  const next = withCloud(s);
   run(`INSERT INTO settings (key, value) VALUES ('store', ?) ON CONFLICT(key) DO UPDATE SET value = excluded.value`, [
-    JSON.stringify(s),
+    JSON.stringify(next),
   ]);
-  enqueue("settings", { key: "store", value: s });
+  enqueue("settings", { key: "store", value: next });
+}
+
+/** Pastikan instal lama memakai alamat cloud tertanam, tanpa isi pengaturan. */
+export function ensureCloudSettings(): void {
+  const row = one<{ value: string }>(`SELECT value FROM settings WHERE key = 'store'`);
+  if (!row) return;
+  const raw = JSON.parse(row.value) as Partial<StoreSettings>;
+  if (raw.apiUrl === CLOUD_API_URL && raw.apiToken === CLOUD_API_TOKEN) return;
+  saveSettings(loadSettings());
 }
 
 export function reportSummary(range: { from: string; to: string }) {
@@ -1566,19 +1808,15 @@ export function reportSummary(range: { from: string; to: string }) {
   const qris = payAmt(selesai, "qris");
   const transfer = payAmt(selesai, "transfer");
   const kartu = payAmt(selesai, "kartu");
-  const hutang = payAmt(selesai, "hutang");
-  const pelunasanRows = listCustomerPayments().filter((p) => inIsoRange(p.createdAt, from, to));
-  const pelunasan = pelunasanRows.reduce((n, p) => n + p.amount, 0);
-  const pelunasanTunai = pelunasanRows.filter((p) => p.method === "tunai").reduce((n, p) => n + p.amount, 0);
+  const memberFees = listMemberFees().filter((f) => inIsoRange(f.createdAt, from, to));
+  const feeOf = (m: PayMethod) => memberFees.filter((f) => f.method === m).reduce((n, f) => n + f.amount, 0);
   const kas = arusKas(mapped, expenses.map((e) => ({ amount: e.amount })), []);
-  kas.tunaiMasuk = tunaiMasuk + pelunasanTunai;
-  kas.qris = qris;
-  kas.transfer = transfer;
-  kas.kartu = kartu;
-  kas.hutang = hutang;
-  kas.pelunasan = pelunasan;
-  kas.nonTunai = qris + transfer + kartu;
-  const tunaiRetur = returDocs.filter((r) => r.method === "tunai").reduce((n, r) => n + r.total, 0);
+  kas.tunaiMasuk = tunaiMasuk + feeOf("tunai");
+  kas.qris = qris + feeOf("qris");
+  kas.transfer = transfer + feeOf("transfer");
+  kas.kartu = kartu + feeOf("kartu");
+  kas.nonTunai = kas.qris + kas.transfer + kas.kartu;
+  const tunaiRetur = returDocs.reduce((n, r) => n + tunaiOutForReturn(r.total, getSale(r.saleId)), 0);
   const allVoids = listSales("all").filter(
     (s) => s.status === "void" && s.voidedAt && inIsoRange(s.voidedAt, from, to),
   );
@@ -1586,7 +1824,7 @@ export function reportSummary(range: { from: string; to: string }) {
     (n, s) => n + s.payments.filter((p) => p.method === "tunai").reduce((m, p) => m + p.amount, 0),
     0,
   );
-  kas.kasLaci = kasAwal + tunaiMasuk + pelunasanTunai - tunaiRetur - tunaiVoid - kas.kasKeluar;
+  kas.kasLaci = kasAwal + kas.tunaiMasuk - tunaiRetur - tunaiVoid - kas.kasKeluar;
 
   type Raw = { at: string; ket: string; debit: number; kredit: number };
   const raw: Raw[] = [];
@@ -1598,11 +1836,9 @@ export function reportSummary(range: { from: string; to: string }) {
     const tunai = s.payments.filter((p) => p.method === "tunai").reduce((n, p) => n + p.amount, 0);
     if (tunai) raw.push({ at: s.voidedAt ?? s.createdAt, ket: `Void: ${s.localNo}`, debit: 0, kredit: tunai });
   }
-  for (const r of returDocs.filter((x) => x.method === "tunai")) {
-    raw.push({ at: r.createdAt, ket: `Retur: ${r.localNo}`, debit: 0, kredit: r.total });
-  }
-  for (const p of pelunasanRows.filter((x) => x.method === "tunai")) {
-    raw.push({ at: p.createdAt, ket: `Pelunasan hutang`, debit: p.amount, kredit: 0 });
+  for (const r of returDocs) {
+    const out = tunaiOutForReturn(r.total, getSale(r.saleId));
+    if (out) raw.push({ at: r.createdAt, ket: `Retur: ${r.localNo}`, debit: 0, kredit: out });
   }
   for (const e of expenses) {
     raw.push({
@@ -1611,6 +1847,10 @@ export function reportSummary(range: { from: string; to: string }) {
       debit: 0,
       kredit: e.amount,
     });
+  }
+  for (const f of memberFees) {
+    if (f.method !== "tunai") continue;
+    raw.push({ at: f.createdAt, ket: "Pendaftaran member", debit: f.amount, kredit: 0 });
   }
   raw.sort((a, b) => a.at.localeCompare(b.at));
   let saldo = kasAwal;
@@ -1635,7 +1875,6 @@ export function reportSummary(range: { from: string; to: string }) {
     ...listRestocks("all").map((r) => localDayFromIso(r.createdAt)),
     ...listReturns().map((r) => localDayFromIso(r.createdAt)),
     ...listCashShifts().map((s) => localDayFromIso(s.openedAt)),
-    ...listCustomerPayments().map((p) => localDayFromIso(p.createdAt)),
   ].sort();
   const dates = [...new Set(allDates)].reverse();
 
@@ -1778,131 +2017,6 @@ export function uniqueDates(table: "sales" | "stock_ins"): string[] {
     .reverse();
 }
 
-export function getCustomer(id: string): Customer | null {
-  const r = one<{ id: string; name: string; phone: string; note: string; active: number; updated_at: string }>(
-    `SELECT id, name, phone, note, active, updated_at FROM customers WHERE id = ?`,
-    [id],
-  );
-  if (!r) return null;
-  return {
-    id: r.id,
-    name: r.name,
-    phone: r.phone ?? "",
-    note: r.note ?? "",
-    active: r.active === 1,
-    updatedAt: r.updated_at,
-    debt: customerDebt(r.id),
-  };
-}
-
-export function listCustomerPayments(): CustomerPayment[] {
-  return all<CustomerPayment>(
-    `SELECT id, customer_id AS customerId, amount, method, note, created_at AS createdAt, cashier_id AS cashierId, cashier_name AS cashierName
-     FROM customer_payments ORDER BY created_at DESC`,
-  );
-}
-
-export function customerDebt(customerId: string): number {
-  const sales = listSales("all").filter((s) => s.customerId === customerId && s.status === "selesai");
-  const hutangIn = sales.reduce((n, s) => n + s.payments.filter((p) => p.method === "hutang").reduce((m, p) => m + p.amount, 0), 0);
-  const hutangRetur = listReturns()
-    .filter((r) => r.method === "hutang" && sales.some((s) => s.id === r.saleId))
-    .reduce((n, r) => n + r.total, 0);
-  const bayar = listCustomerPayments()
-    .filter((p) => p.customerId === customerId)
-    .reduce((n, p) => n + p.amount, 0);
-  return Math.max(0, hutangIn - hutangRetur - bayar);
-}
-
-export function listCustomers(includeInactive = false): Customer[] {
-  const sql = includeInactive
-    ? `SELECT id, name, phone, note, active, updated_at FROM customers ORDER BY name`
-    : `SELECT id, name, phone, note, active, updated_at FROM customers WHERE active = 1 ORDER BY name`;
-  return all<{ id: string; name: string; phone: string; note: string; active: number; updated_at: string }>(sql).map(
-    (r) => ({
-      id: r.id,
-      name: r.name,
-      phone: r.phone ?? "",
-      note: r.note ?? "",
-      active: r.active === 1,
-      updatedAt: r.updated_at,
-      debt: customerDebt(r.id),
-    }),
-  );
-}
-
-export function upsertCustomer(input: {
-  id?: string;
-  name: string;
-  phone?: string;
-  note?: string;
-  active?: boolean;
-}): { ok: true; customer: Customer } | { ok: false; error: string } {
-  const name = input.name.trim();
-  if (!name) return { ok: false, error: "Nama wajib diisi" };
-  const now = new Date().toISOString();
-  const id = input.id ?? newId();
-  const existing = input.id ? one<{ id: string }>(`SELECT id FROM customers WHERE id = ?`, [id]) : null;
-  if (input.id && !existing) return { ok: false, error: "Pelanggan tidak ditemukan" };
-  const phone = (input.phone ?? "").trim();
-  const note = (input.note ?? "").trim();
-  const active = input.active !== false;
-  if (existing) {
-    run(`UPDATE customers SET name=?, phone=?, note=?, active=?, updated_at=? WHERE id=?`, [
-      name,
-      phone,
-      note,
-      active ? 1 : 0,
-      now,
-      id,
-    ]);
-  } else {
-    run(`INSERT INTO customers (id, name, phone, note, active, updated_at) VALUES (?, ?, ?, ?, ?, ?)`, [
-      id,
-      name,
-      phone,
-      note,
-      active ? 1 : 0,
-      now,
-    ]);
-  }
-  enqueue("customer", { id, name, phone, note, active, updatedAt: now });
-  return { ok: true, customer: { id, name, phone, note, active, updatedAt: now, debt: customerDebt(id) } };
-}
-
-export function addCustomerPayment(input: {
-  customerId: string;
-  amount: number;
-  method: PayMethod;
-  note?: string;
-  cashier: Session;
-}): CustomerPayment {
-  if (!currentOpenShift()) throw new Error("Buka kasir dulu sebelum terima pelunasan.");
-  const cust = getCustomer(input.customerId);
-  if (!cust) throw new Error("Pelanggan tidak ditemukan");
-  const amount = Math.max(0, Math.round(input.amount));
-  if (amount <= 0) throw new Error("Nominal pelunasan wajib diisi");
-  if (amount > cust.debt) throw new Error(`Melebihi sisa hutang (${cust.debt})`);
-  if (input.method === "hutang") throw new Error("Metode pelunasan tidak valid");
-  const row: CustomerPayment = {
-    id: newId(),
-    customerId: input.customerId,
-    amount,
-    method: input.method,
-    note: (input.note ?? "").trim(),
-    createdAt: new Date().toISOString(),
-    cashierId: input.cashier.id,
-    cashierName: input.cashier.name,
-  };
-  run(
-    `INSERT INTO customer_payments (id, customer_id, amount, method, note, created_at, cashier_id, cashier_name)
-     VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
-    [row.id, row.customerId, row.amount, row.method, row.note, row.createdAt, row.cashierId, row.cashierName],
-  );
-  enqueue("customer_payment", row);
-  return row;
-}
-
 function isoOf(v: unknown): string {
   if (typeof v === "string") return v;
   if (v instanceof Date) return v.toISOString();
@@ -1920,6 +2034,8 @@ export function applyPullPayload(data: Record<string, unknown>): void {
   const employeesIn = Array.isArray(data.employees) ? data.employees : [];
   const eventsIn = Array.isArray(data.stockEvents) ? data.stockEvents : [];
   const customersIn = Array.isArray(data.customers) ? data.customers : [];
+  const feesIn = Array.isArray(data.customerPayments) ? data.customerPayments : [];
+  const rewardsIn = Array.isArray(data.memberRewards) ? data.memberRewards : [];
   tx(() => {
     for (const raw of productsIn) {
       const p = raw as Record<string, unknown>;
@@ -2013,27 +2129,6 @@ export function applyPullPayload(data: Record<string, unknown>): void {
         ]);
       }
     }
-    for (const raw of customersIn) {
-      const c = raw as Record<string, unknown>;
-      const id = String(c.id ?? "");
-      if (!id) continue;
-      const updatedAt = isoOf(pick(c, "updatedAt", "updated_at"));
-      const local = one<{ updated_at: string }>(`SELECT updated_at FROM customers WHERE id = ?`, [id]);
-      if (local && local.updated_at >= updatedAt) continue;
-      run(
-        `INSERT INTO customers (id, name, phone, note, active, updated_at) VALUES (?, ?, ?, ?, ?, ?)
-         ON CONFLICT(id) DO UPDATE SET name=excluded.name, phone=excluded.phone, note=excluded.note,
-           active=excluded.active, updated_at=excluded.updated_at`,
-        [
-          id,
-          String(c.name ?? ""),
-          String(c.phone ?? ""),
-          String(c.note ?? ""),
-          pick(c, "active", "active") === false || pick(c, "active", "active") === 0 ? 0 : 1,
-          updatedAt,
-        ],
-      );
-    }
     for (const raw of eventsIn) {
       const e = raw as Record<string, unknown>;
       const id = String(e.id ?? "");
@@ -2050,6 +2145,64 @@ export function applyPullPayload(data: Record<string, unknown>): void {
           pick(e, "refId", "ref_id") == null ? null : String(pick(e, "refId", "ref_id")),
           device,
           isoOf(pick(e, "createdAt", "created_at")),
+        ],
+      );
+    }
+    for (const raw of customersIn) {
+      const c = raw as Record<string, unknown>;
+      const id = String(c.id ?? "");
+      if (!id) continue;
+      const updatedAt = isoOf(pick(c, "updatedAt", "updated_at"));
+      const local = one<{ updated_at: string }>(`SELECT updated_at FROM customers WHERE id = ?`, [id]);
+      if (local && local.updated_at >= updatedAt) continue;
+      run(
+        `INSERT INTO customers (id, name, phone, note, active, updated_at)
+         VALUES (?, ?, ?, ?, ?, ?)
+         ON CONFLICT(id) DO UPDATE SET name=excluded.name, phone=excluded.phone, note=excluded.note,
+           active=excluded.active, updated_at=excluded.updated_at`,
+        [
+          id,
+          String(c.name ?? ""),
+          String(c.phone ?? ""),
+          String(c.note ?? ""),
+          pick(c, "active", "active") === false || pick(c, "active", "active") === 0 ? 0 : 1,
+          updatedAt,
+        ],
+      );
+    }
+    for (const raw of feesIn) {
+      const f = raw as Record<string, unknown>;
+      const id = String(f.id ?? "");
+      if (!id) continue;
+      run(
+        `INSERT OR IGNORE INTO customer_payments (id, customer_id, amount, method, note, created_at, cashier_id, cashier_name)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
+        [
+          id,
+          String(pick(f, "customerId", "customer_id") ?? ""),
+          Number(f.amount ?? 0),
+          String(f.method ?? "tunai"),
+          String(f.note ?? ""),
+          isoOf(pick(f, "createdAt", "created_at")),
+          String(pick(f, "cashierId", "cashier_id") ?? ""),
+          String(pick(f, "cashierName", "cashier_name") ?? ""),
+        ],
+      );
+    }
+    for (const raw of rewardsIn) {
+      const r = raw as Record<string, unknown>;
+      const id = String(r.id ?? "");
+      if (!id) continue;
+      run(
+        `INSERT OR IGNORE INTO member_rewards (id, customer_id, visits, created_at, cashier_id, cashier_name)
+         VALUES (?, ?, ?, ?, ?, ?)`,
+        [
+          id,
+          String(pick(r, "memberId", "customer_id") ?? pick(r, "customerId", "customer_id") ?? ""),
+          Number(r.visits ?? 0),
+          isoOf(pick(r, "createdAt", "created_at")),
+          String(pick(r, "cashierId", "cashier_id") ?? ""),
+          String(pick(r, "cashierName", "cashier_name") ?? ""),
         ],
       );
     }

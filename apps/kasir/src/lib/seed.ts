@@ -4,6 +4,7 @@ import {
   type StoreSettings,
 } from "@sklamini/shared";
 import { all, one, run } from "./db.ts";
+import { CLOUD_API_TOKEN, CLOUD_API_URL } from "./cloud.ts";
 import { defaultMenus } from "../types.ts";
 
 export const SEED_PRODUCTS = [
@@ -67,7 +68,8 @@ export async function seedIfEmpty(): Promise<void> {
 
   const settings: StoreSettings = {
     ...DEFAULT_SETTINGS,
-    apiUrl: import.meta.env.VITE_API_URL || DEFAULT_SETTINGS.apiUrl,
+    apiUrl: CLOUD_API_URL,
+    apiToken: CLOUD_API_TOKEN,
   };
   run(`INSERT INTO settings (key, value) VALUES ('store', ?)`, [
     JSON.stringify(settings),

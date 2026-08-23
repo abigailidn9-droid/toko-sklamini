@@ -3,6 +3,7 @@ import {
   PRODUCT_CATEGORIES,
   formatQty,
   formatRupiahInput,
+  parseQty,
   parseRupiah,
   rp,
 } from "@sklamini/shared";
@@ -11,6 +12,7 @@ import { PageShell } from "../components/PageHeader.tsx";
 import { parseProductFile } from "../lib/importProducts.ts";
 import { listProducts, upsertProduct } from "../lib/repo.ts";
 import { useToast } from "../ui/toast.tsx";
+import { useScanFocus } from "../lib/useScanFocus.ts";
 
 const emptyForm = {
   id: "",
@@ -20,6 +22,7 @@ const emptyForm = {
   category: "Sembako",
   buyPrice: "",
   sellPrice: "",
+  openingStock: "",
 };
 
 export function ProdukPage({ tick, onChange }: { tick: number; onChange: () => void }) {
@@ -33,6 +36,7 @@ export function ProdukPage({ tick, onChange }: { tick: number; onChange: () => v
   const [cat, setCat] = useState("Semua");
   const [importOpen, setImportOpen] = useState(false);
   const importRef = useRef<HTMLDivElement>(null);
+  const { ref: scanRef } = useScanFocus(!open);
 
   useEffect(() => {
     if (!importOpen) return;
@@ -68,7 +72,7 @@ export function ProdukPage({ tick, onChange }: { tick: number; onChange: () => v
         toast.show("Tidak ada produk", "info", "File tidak berisi baris yang bisa dibaca.");
         return;
       }
-      for (const r of rows) upsertProduct(r);
+      for (const r of rows) upsertProduct({ ...r, upsertByBarcode: true });
       toast.show(`${rows.length} produk diimpor`, "ok", "Katalog sudah diperbarui.");
       onChange();
     } catch {
@@ -88,6 +92,7 @@ export function ProdukPage({ tick, onChange }: { tick: number; onChange: () => v
       category,
       buyPrice: parseRupiah(form.buyPrice),
       sellPrice: parseRupiah(form.sellPrice),
+      openingQty: editing ? 0 : parseQty(form.openingStock),
     });
     if (!res.ok) {
       toast.show("Tidak tersimpan", "error", res.error);
@@ -154,6 +159,7 @@ export function ProdukPage({ tick, onChange }: { tick: number; onChange: () => v
       }
     >
       <Field
+        ref={scanRef}
         placeholder="Cari nama, barcode, atau kategori…"
         value={q}
         onChange={(e) => setQ(e.target.value)}
@@ -198,6 +204,7 @@ export function ProdukPage({ tick, onChange }: { tick: number; onChange: () => v
                   category: p.category,
                   buyPrice: formatRupiahInput(String(p.buyPrice)),
                   sellPrice: formatRupiahInput(String(p.sellPrice)),
+                  openingStock: "",
                 });
                 setEditing(true);
                 setNewCategory(false);
@@ -338,6 +345,17 @@ export function ProdukPage({ tick, onChange }: { tick: number; onChange: () => v
                   />
                 </div>
               </label>
+              {!editing ? (
+                <label className="field-label">
+                  <span>Stok awal</span>
+                  <Field
+                    inputMode="decimal"
+                    placeholder="0"
+                    value={form.openingStock}
+                    onChange={(e) => setForm({ ...form, openingStock: e.target.value })}
+                  />
+                </label>
+              ) : null}
               <Button variant="primary" disabled={!form.barcode || !form.name || !form.category.trim()} onClick={save}>
                 Simpan
               </Button>

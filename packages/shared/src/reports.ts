@@ -48,8 +48,6 @@ export function arusKas(
     qris,
     transfer,
     kartu,
-    hutang: 0,
-    pelunasan: 0,
     nonTunai: qris + transfer + kartu,
     pengeluaran,
     restockTunai,

@@ -59,7 +59,7 @@ export function LaporanPage({
       ? formatDateId(range.from)
       : `${formatDateId(range.from)} – ${formatDateId(range.to)}`;
   const title =
-    tab === "laba" ? "LAPORAN LABA RUGI" : tab === "kas" ? "BUKU KAS" : "LAPORAN STOK";
+    tab === "laba" ? "LAPORAN LABA RUGI" : tab === "kas" ? "LAPORAN ARUS KAS" : "LAPORAN STOK";
   const slug =
     mode === "hari"
       ? range.from
@@ -114,12 +114,12 @@ export function LaporanPage({
           table: {
             columns: [
               { label: "No", width: 28, align: "center" },
-              { label: "Barang", width: 210 },
+              { label: "Barang", width: 196 },
               { label: "Sat", width: 36 },
-              { label: "Awal", width: 52, align: "right" },
-              { label: "Masuk", width: 52, align: "right" },
-              { label: "Keluar", width: 52, align: "right" },
-              { label: "Akhir", width: 52, align: "right" },
+              { label: "Awal", width: 50, align: "right" },
+              { label: "Masuk", width: 50, align: "right" },
+              { label: "Keluar", width: 50, align: "right" },
+              { label: "Akhir", width: 50, align: "right" },
             ],
             rows,
           },
@@ -130,17 +130,17 @@ export function LaporanPage({
     }
     if (tab === "kas") {
       downloadPdf(
-        `Buku-Kas-${slug}.pdf`,
+        `Laporan-Arus-Kas-${slug}.pdf`,
         buildReportPdf({
           ...base,
           table: {
             columns: [
               { label: "No", width: 28, align: "center" },
-              { label: "Tanggal", width: 90 },
-              { label: "Keterangan", width: 210 },
-              { label: "Debit", width: 72, align: "right" },
-              { label: "Kredit", width: 72, align: "right" },
-              { label: "Saldo", width: 80, align: "right" },
+              { label: "Tanggal", width: 86 },
+              { label: "Keterangan", width: 196 },
+              { label: "Debit", width: 70, align: "right" },
+              { label: "Kredit", width: 70, align: "right" },
+              { label: "Saldo", width: 76, align: "right" },
             ],
             rows: data.bukuKas.map((row) => ({
               cells: [
@@ -180,10 +180,11 @@ export function LaporanPage({
   return (
     <PageShell
       page="laporan"
-      title="Laporan keuangan"
-      hint="Laba rugi, buku kas, dan mutasi stok."
-      actions={
-        <>
+      title="Laporan"
+      hint="Laba rugi, arus kas, dan stok. Format A4."
+      className="laporan-page"
+    >
+      <div className="laporan-bar">
         <div className="tabs">
           <button className={`tab ${mode === "hari" ? "on" : ""}`} type="button" onClick={() => setMode("hari")}>
             Hari ini
@@ -222,6 +223,7 @@ export function LaporanPage({
             />
           </div>
         ) : null}
+        <span className="grow" />
         <div className="tabs">
           <button className={`tab ${tab === "laba" ? "on" : ""}`} type="button" onClick={() => setTab("laba")}>
             Laba rugi
@@ -236,25 +238,26 @@ export function LaporanPage({
         <Button variant="primary" onClick={unduhPdf}>
           Unduh PDF
         </Button>
-        </>
-      }
-    >
-      <div className="report-sheet">
-        <header className="report-head">
-          {settings.logoDataUrl ? <img className="report-logo" src={settings.logoDataUrl} alt="" /> : null}
-          <h1>{settings.storeName}</h1>
-          <p>{settings.address}</p>
-          <p>Telp: {settings.phone}</p>
-          <h2>{title}</h2>
-          <p>Periode: {periode}</p>
-        </header>
-        {tab === "laba" ? (
-          <LabaRugiSheet r={r} />
-        ) : tab === "kas" ? (
-          <BukuKasSheet rows={data.bukuKas} kas={data.arusKas} />
-        ) : (
-          <StokSheet rows={stok.rows} totals={stok.totals} />
-        )}
+      </div>
+
+      <div className="report-stage">
+        <article className="report-sheet">
+          <header className="report-head">
+            {settings.logoDataUrl ? <img className="report-logo" src={settings.logoDataUrl} alt="" /> : null}
+            <h1>{settings.storeName}</h1>
+            {settings.address ? <p>{settings.address}</p> : null}
+            {settings.phone ? <p>Telp: {settings.phone}</p> : null}
+            <h2>{title}</h2>
+            <p className="report-periode">Periode {periode}</p>
+          </header>
+          {tab === "laba" ? (
+            <LabaRugiSheet r={r} />
+          ) : tab === "kas" ? (
+            <BukuKasSheet rows={data.bukuKas} kas={data.arusKas} />
+          ) : (
+            <StokSheet rows={stok.rows} totals={stok.totals} />
+          )}
+        </article>
       </div>
     </PageShell>
   );
@@ -334,7 +337,7 @@ function BukuKasSheet({
   kas: ReturnType<typeof reportSummary>["arusKas"];
 }) {
   return (
-    <div>
+    <div className="report-body">
       <table className="buku-kas">
         <thead>
           <tr>
@@ -373,22 +376,12 @@ function BukuKasSheet({
           <b className="tabular">{rp(kas.kartu)}</b>
         </div>
         <div>
-          <span>Hutang</span>
-          <b className="tabular">{rp(kas.hutang)}</b>
-        </div>
-        <div>
-          <span>Pelunasan</span>
-          <b className="tabular">{rp(kas.pelunasan)}</b>
-        </div>
-        <div>
           <span>Kas laci</span>
           <b className="tabular">{rp(kas.kasLaci)}</b>
         </div>
       </div>
       <p className="buku-note">
-        Buku kas hanya mencatat tunai di laci. Saldo awal diambil dari kas awal shift pertama di periode.
-        Retur tunai keluar dari laci. Pembelian barang dicatat di Pengeluaran. Restock hanya menambah stok.
-        QRIS, transfer, dan kartu tidak masuk saldo.
+        Hanya tunai di laci. Saldo awal dari kas awal shift pertama. QRIS, transfer, dan kartu tidak masuk saldo.
       </p>
     </div>
   );
@@ -413,7 +406,7 @@ function StokSheet({
     body.push({ key: row.productId, kind: "row", row, no });
   }
   return (
-    <div>
+    <div className="report-body">
       <table className="buku-kas stok-kas">
         <thead>
           <tr>
@@ -473,7 +466,7 @@ function StokSheet({
         ) : null}
       </table>
       <p className="buku-note">
-        Masuk dari restock, retur, void, atau opname lebih. Keluar dari penjualan atau opname kurang. Stok akhir = awal + masuk − keluar.
+        Masuk dari restock, retur, void, atau opname lebih. Keluar dari penjualan atau opname kurang.
       </p>
     </div>
   );

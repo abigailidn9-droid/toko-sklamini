@@ -7,8 +7,6 @@ import { db } from "./db/index.ts";
 import {
   attendances,
   cashShifts,
-  customerPayments,
-  customers,
   employees,
   expenses,
   opnameItems,
@@ -24,6 +22,9 @@ import {
   stockInItems,
   stockIns,
   users,
+  customers,
+  customerPayments,
+  memberRewards,
 } from "./db/schema.ts";
 
 const app = new Hono();
@@ -59,13 +60,15 @@ app.post("/v1/auth/login", async (c) => {
 app.get("/v1/sync/pull", async (c) => {
   const since = c.req.query("since") ?? "1970-01-01T00:00:00.000Z";
   const sinceDate = new Date(since);
-  const [prod, ev, usr, emp, set, cust] = await Promise.all([
+  const [prod, ev, usr, emp, set, cust, fees, rewards] = await Promise.all([
     db.select().from(products).where(gte(products.updatedAt, sinceDate)),
     db.select().from(stockEvents).where(gte(stockEvents.createdAt, sinceDate)),
     db.select().from(users).where(gte(users.updatedAt, sinceDate)),
     db.select().from(employees).where(gte(employees.updatedAt, sinceDate)),
     db.select().from(settings),
     db.select().from(customers).where(gte(customers.updatedAt, sinceDate)),
+    db.select().from(customerPayments).where(gte(customerPayments.createdAt, sinceDate)),
+    db.select().from(memberRewards).where(gte(memberRewards.createdAt, sinceDate)),
   ]);
   return c.json({
     cursor: new Date().toISOString(),
@@ -75,6 +78,8 @@ app.get("/v1/sync/pull", async (c) => {
     employees: emp,
     settings: set,
     customers: cust,
+    customerPayments: fees,
+    memberRewards: rewards,
   });
 });
 
@@ -380,6 +385,20 @@ async function applyItem(entity: string, payload: Record<string, unknown>) {
         amount: Number(payload.amount),
         method: String(payload.method),
         note: String(payload.note ?? ""),
+        createdAt: asDate(payload.createdAt),
+        cashierId: String(payload.cashierId),
+        cashierName: String(payload.cashierName),
+      })
+      .onConflictDoNothing();
+    return;
+  }
+  if (entity === "member_reward") {
+    await db
+      .insert(memberRewards)
+      .values({
+        id: String(payload.id),
+        customerId: String(payload.memberId ?? payload.customerId),
+        visits: Number(payload.visits),
         createdAt: asDate(payload.createdAt),
         cashierId: String(payload.cashierId),
         cashierName: String(payload.cashierName),

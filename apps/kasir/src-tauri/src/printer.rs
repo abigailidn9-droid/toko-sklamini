@@ -190,30 +190,40 @@ public static class SklaminiSpool {
 }
 "@
 }
-$h = [IntPtr]::Zero
-if (-not [SklaminiSpool]::OpenPrinter($printer, [ref]$h, [IntPtr]::Zero)) {
-  throw "Tidak bisa membuka printer: $printer"
-}
-$di = New-Object SklaminiSpool+DOC_INFO_1
-$di.pDocName = 'Struk'
-$di.pOutputFile = $null
-$di.pDatatype = 'RAW'
-$ok = $false
-try {
-  if ([SklaminiSpool]::StartDocPrinter($h, 1, [ref]$di) -eq 0) { throw 'Gagal StartDocPrinter RAW' }
+function Send-Bytes($name, $payload, $datatype) {
+  $h = [IntPtr]::Zero
+  if (-not [SklaminiSpool]::OpenPrinter($name, [ref]$h, [IntPtr]::Zero)) { return $false }
+  $di = New-Object SklaminiSpool+DOC_INFO_1
+  $di.pDocName = 'Struk'
+  $di.pOutputFile = $null
+  $di.pDatatype = $datatype
+  $ok = $false
   try {
-    if (-not [SklaminiSpool]::StartPagePrinter($h)) { throw 'Gagal StartPagePrinter' }
-    $written = 0
-    if (-not [SklaminiSpool]::WritePrinter($h, $bytes, $bytes.Length, [ref]$written)) { throw 'Gagal kirim struk' }
-    $ok = $true
+    if ([SklaminiSpool]::StartDocPrinter($h, 1, [ref]$di) -eq 0) { return $false }
+    try {
+      if (-not [SklaminiSpool]::StartPagePrinter($h)) { return $false }
+      $written = 0
+      if (-not [SklaminiSpool]::WritePrinter($h, $payload, $payload.Length, [ref]$written)) { return $false }
+      $ok = $true
+    } finally {
+      [SklaminiSpool]::EndPagePrinter($h) | Out-Null
+      [SklaminiSpool]::EndDocPrinter($h) | Out-Null
+    }
   } finally {
-    [SklaminiSpool]::EndPagePrinter($h) | Out-Null
+    [SklaminiSpool]::ClosePrinter($h) | Out-Null
   }
-} finally {
-  [SklaminiSpool]::EndDocPrinter($h) | Out-Null
-  [SklaminiSpool]::ClosePrinter($h) | Out-Null
+  return $ok
 }
-if (-not $ok) { throw 'Gagal mencetak struk' }
+$names = New-Object System.Collections.Generic.List[string]
+if ($printer) { $names.Add($printer) | Out-Null }
+$def = [string]((Get-CimInstance Win32_Printer | Where-Object { $_.Default } | Select-Object -First 1).Name)
+if ($def -and -not $names.Contains($def)) { $names.Add($def) | Out-Null }
+$sent = $false
+foreach ($n in $names) {
+  if (Send-Bytes $n $bytes 'RAW') { $sent = $true; break }
+  if (Send-Bytes $n $bytes 'TEXT') { $sent = $true; break }
+}
+if (-not $sent) { throw 'Gagal mencetak struk. Pilih printer thermal di Pengaturan.' }
 'ok'
 "#;
     let text = crate::winps::run_powershell_env(

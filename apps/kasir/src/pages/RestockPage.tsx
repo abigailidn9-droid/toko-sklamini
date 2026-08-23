@@ -2,6 +2,7 @@ import { useMemo, useState, Fragment } from "react";
 import {
   formatDateId,
   inIsoRange,
+  localDayFromIso,
   monthStartIso,
   todayIso,
   type Product,
@@ -19,6 +20,7 @@ import {
   type Session,
 } from "../lib/repo.ts";
 import { scanBeep } from "../lib/beep.ts";
+import { useScanFocus } from "../lib/useScanFocus.ts";
 import { useToast } from "../ui/toast.tsx";
 
 export function RestockPage({
@@ -74,6 +76,10 @@ function RestockNew({
   const [scan, setScan] = useState("");
   const [lines, setLines] = useState<{ product: Product; qty: number }[]>([]);
   const [removeLine, setRemoveLine] = useState<{ id: string; name: string } | null>(null);
+  const { ref: scanRef, focus: focusScan } = useScanFocus(!removeLine, {
+    restoreOnWindowFocus: true,
+    returnAfterClick: true,
+  });
 
   function add(p: Product, fromScan = false) {
     setLines((prev) => {
@@ -83,6 +89,7 @@ function RestockNew({
     });
     setScan("");
     if (fromScan) scanBeep();
+    focusScan(true);
   }
 
   function onScanChange(v: string) {
@@ -115,7 +122,7 @@ function RestockNew({
   return (
     <div className="stack">
       <Field
-        autoFocus
+        ref={scanRef}
         placeholder="Scan barcode barang masuk…"
         value={scan}
         onChange={(e) => onScanChange(e.target.value)}
@@ -168,6 +175,7 @@ function RestockNew({
               setLines([]);
               toast.show(`${doc.localNo} tersimpan`, "ok", "Stok bertambah. Catat bayar supplier di Pengeluaran.");
               onChange();
+              focusScan(true);
             }}
           >
             Simpan
@@ -242,7 +250,7 @@ function RestockHistory({ tick, onChange }: { tick: number; onChange: () => void
   const groups = useMemo(() => {
     const byDay = new Map<string, StockIn[]>();
     for (const d of docs) {
-      const day = d.createdAt.slice(0, 10);
+      const day = localDayFromIso(d.createdAt);
       const list = byDay.get(day);
       if (list) list.push(d);
       else byDay.set(day, [d]);
