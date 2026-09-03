@@ -27,13 +27,11 @@ jobs:
           tagName: ${{ github.ref_name }}
           releaseName: TOKO SKLAMINI ${{ github.ref_name }}
           releaseBody: |
-            Kasir Windows 1.4.0.
+            Kasir Windows.
 
-            - Data toko (nota, restock, stok, opname, pengeluaran, absen) ikut sync antar komputer
-            - Unduh Excel dari halaman Produk
-            - Barang dummy tidak diisi lagi
-            - Reset kasir tidak menghapus data di server
+            Perbaikan buka aplikasi (pengaturan sudah ada tidak bikin error).
+            Data toko ikut sync antar komputer. Unduh Excel dari halaman Produk.
 
-            Pasang di komputer toko sebagai update. Backup dulu (Pengaturan → Data → Unduh backup). Jangan hapus data lama.
+            Pasang di komputer toko sebagai update. Backup dulu (Pengaturan → Data → Unduh backup).
           releaseDraft: false
           prerelease: false

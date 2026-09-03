@@ -3,7 +3,7 @@ import type { CartSnapshot, StoreSettings } from "@sklamini/shared";
 import { NAV, defaultMenus, type Page } from "./types.ts";
 import { CloudStatus } from "./components/CloudStatus.tsx";
 import { NavGlyph } from "./components/NavGlyph.tsx";
-import { openDb } from "./lib/db.ts";
+import { openDb, persistNow } from "./lib/db.ts";
 import { seedIfEmpty, removeSampleProducts } from "./lib/seed.ts";
 import {
   getSale,
@@ -72,6 +72,7 @@ export default function App() {
         }
         await seedIfEmpty();
         removeSampleProducts();
+        await persistNow();
         await backfillUserPins();
         ensureMemberMenu();
         ensureCloudSettings();

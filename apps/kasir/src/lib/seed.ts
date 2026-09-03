@@ -2,7 +2,6 @@ import {
   DEFAULT_SETTINGS,
   SAMPLE_PRODUCTS,
   hashPin,
-  type StoreSettings,
 } from "@sklamini/shared";
 import { all, one, run } from "./db.ts";
 import { CLOUD_API_TOKEN, CLOUD_API_URL } from "./cloud.ts";
@@ -72,40 +71,46 @@ export function removeSampleProducts(): void {
 }
 
 export async function seedIfEmpty(): Promise<void> {
-  const count = one<{ n: number }>("SELECT COUNT(*) AS n FROM users");
-  if (count && count.n > 0) return;
-
   const now = new Date().toISOString();
-  run(
-    `INSERT INTO users (id, name, role, pin_hash, pin, menus, active, updated_at) VALUES (?, ?, ?, ?, ?, ?, 1, ?)`,
-    ["user-owner", "Budi", "owner", await hashPin("123456"), "", JSON.stringify(defaultMenus("owner")), now],
-  );
-  run(
-    `INSERT INTO users (id, name, role, pin_hash, pin, menus, active, updated_at) VALUES (?, ?, ?, ?, ?, ?, 1, ?)`,
-    ["user-kasir", "Siti", "kasir", await hashPin("111111"), "", JSON.stringify(defaultMenus("kasir")), now],
-  );
-  run(
-    `INSERT INTO employees (id, name, job_role, pin_hash, active, updated_at) VALUES (?, ?, ?, ?, 1, ?)`,
-    ["emp-siti", "Siti", "Kasir", await hashPin("111111"), now],
-  );
-  run(
-    `INSERT INTO employees (id, name, job_role, pin_hash, active, updated_at) VALUES (?, ?, ?, ?, 1, ?)`,
-    ["emp-andi", "Andi", "Gudang", await hashPin("222222"), now],
-  );
-  run(
-    `INSERT INTO employees (id, name, job_role, pin_hash, active, updated_at) VALUES (?, ?, ?, ?, 1, ?)`,
-    ["emp-budi", "Budi", "Owner", await hashPin("123456"), now],
-  );
+  const userCount = one<{ n: number }>("SELECT COUNT(*) AS n FROM users");
+  if (!userCount || !userCount.n) {
+    run(
+      `INSERT INTO users (id, name, role, pin_hash, pin, menus, active, updated_at) VALUES (?, ?, ?, ?, ?, ?, 1, ?)
+       ON CONFLICT(id) DO NOTHING`,
+      ["user-owner", "Budi", "owner", await hashPin("123456"), "", JSON.stringify(defaultMenus("owner")), now],
+    );
+    run(
+      `INSERT INTO users (id, name, role, pin_hash, pin, menus, active, updated_at) VALUES (?, ?, ?, ?, ?, ?, 1, ?)
+       ON CONFLICT(id) DO NOTHING`,
+      ["user-kasir", "Siti", "kasir", await hashPin("111111"), "", JSON.stringify(defaultMenus("kasir")), now],
+    );
+    run(
+      `INSERT INTO employees (id, name, job_role, pin_hash, active, updated_at) VALUES (?, ?, ?, ?, 1, ?)
+       ON CONFLICT(id) DO NOTHING`,
+      ["emp-siti", "Siti", "Kasir", await hashPin("111111"), now],
+    );
+    run(
+      `INSERT INTO employees (id, name, job_role, pin_hash, active, updated_at) VALUES (?, ?, ?, ?, 1, ?)
+       ON CONFLICT(id) DO NOTHING`,
+      ["emp-andi", "Andi", "Gudang", await hashPin("222222"), now],
+    );
+    run(
+      `INSERT INTO employees (id, name, job_role, pin_hash, active, updated_at) VALUES (?, ?, ?, ?, 1, ?)
+       ON CONFLICT(id) DO NOTHING`,
+      ["emp-budi", "Budi", "Owner", await hashPin("123456"), now],
+    );
+    if (!one<{ id: string }>("SELECT id FROM customers LIMIT 1")) insertSeedMembers(now);
+  }
 
-  if (!one<{ id: string }>("SELECT id FROM customers LIMIT 1")) insertSeedMembers(now);
-
-  const settings: StoreSettings = {
-    ...DEFAULT_SETTINGS,
-    apiUrl: CLOUD_API_URL,
-    apiToken: CLOUD_API_TOKEN,
-  };
-  run(`INSERT INTO settings (key, value) VALUES ('store', ?)`, [
-    JSON.stringify(settings),
-  ]);
+  run(
+    `INSERT INTO settings (key, value) VALUES ('store', ?) ON CONFLICT(key) DO NOTHING`,
+    [
+      JSON.stringify({
+        ...DEFAULT_SETTINGS,
+        apiUrl: CLOUD_API_URL,
+        apiToken: CLOUD_API_TOKEN,
+      }),
+    ],
+  );
   ensureSyncMeta();
 }
