@@ -29,9 +29,7 @@ jobs:
           releaseBody: |
             Kasir Windows.
 
-            Perbaikan buka aplikasi (pengaturan sudah ada tidak bikin error).
-            Data toko ikut sync antar komputer. Unduh Excel dari halaman Produk.
-
-            Pasang di komputer toko sebagai update. Backup dulu (Pengaturan → Data → Unduh backup).
+            Tab kategori kosong di Produk tidak tampil. Laporan stok hanya barang di katalog.
+            Pasang sebagai update. Backup dulu.
           releaseDraft: false
           prerelease: false

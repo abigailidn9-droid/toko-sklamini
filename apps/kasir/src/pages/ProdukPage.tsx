@@ -49,12 +49,22 @@ export function ProdukPage({ tick, onChange }: { tick: number; onChange: () => v
     return () => document.removeEventListener("mousedown", close);
   }, [importOpen]);
 
-  const knownCats = useMemo(() => {
-    const extra = products.map((p) => p.category).filter(Boolean);
-    return [...new Set([...PRODUCT_CATEGORIES, ...extra])];
+  const usedCats = useMemo(() => {
+    return [...new Set(products.map((p) => p.category).filter(Boolean))].sort((a, b) =>
+      a.localeCompare(b, "id"),
+    );
   }, [products]);
 
-  const categories = useMemo(() => ["Semua", ...knownCats], [knownCats]);
+  const knownCats = useMemo(
+    () => [...new Set([...PRODUCT_CATEGORIES, ...usedCats])],
+    [usedCats],
+  );
+
+  const categories = useMemo(() => ["Semua", ...usedCats], [usedCats]);
+
+  useEffect(() => {
+    if (cat !== "Semua" && !usedCats.includes(cat)) setCat("Semua");
+  }, [cat, usedCats]);
 
   const shown = products.filter((p) => {
     if (cat !== "Semua" && p.category !== cat) return false;
