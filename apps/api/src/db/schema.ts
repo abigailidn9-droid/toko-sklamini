@@ -84,6 +84,7 @@ export const expenses = pgTable("expenses", {
   category: text("category").notNull(),
   amount: integer("amount").notNull(),
   note: text("note").notNull(),
+  fund: text("fund").notNull().default("laci"),
   createdAt: timestamp("created_at", { withTimezone: true }).notNull(),
   cashierName: text("cashier_name").notNull(),
 });

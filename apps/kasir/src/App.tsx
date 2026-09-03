@@ -4,7 +4,7 @@ import { NAV, defaultMenus, type Page } from "./types.ts";
 import { CloudStatus } from "./components/CloudStatus.tsx";
 import { NavGlyph } from "./components/NavGlyph.tsx";
 import { openDb } from "./lib/db.ts";
-import { seedIfEmpty } from "./lib/seed.ts";
+import { seedIfEmpty, removeSampleProducts } from "./lib/seed.ts";
 import {
   getSale,
   listDrafts,
@@ -13,6 +13,7 @@ import {
   backfillUserPins,
   ensureCloudSettings,
   ensureMemberMenu,
+  ensureSyncMeta,
   type Session,
 } from "./lib/repo.ts";
 import { printNota, printStruk } from "./lib/print.ts";
@@ -63,7 +64,14 @@ export default function App() {
     (async () => {
       try {
         await openDb();
+        ensureSyncMeta();
+        try {
+          await syncNow();
+        } catch {
+          /* offline: pakai data lokal / sample */
+        }
         await seedIfEmpty();
+        removeSampleProducts();
         await backfillUserPins();
         ensureMemberMenu();
         ensureCloudSettings();
@@ -91,12 +99,16 @@ export default function App() {
     let stopped = false;
     const tick = async () => {
       const status = await syncNow();
-      if (!stopped) setCloud(status);
+      if (!stopped) {
+        removeSampleProducts();
+        setCloud(status);
+        refresh();
+      }
     };
     void tick();
     const timer = window.setInterval(() => {
       void tick();
-    }, 12000);
+    }, 4000);
     const onOnline = () => {
       void tick();
     };
@@ -111,7 +123,7 @@ export default function App() {
       window.removeEventListener("online", onOnline);
       document.removeEventListener("visibilitychange", onVisible);
     };
-  }, [ready]);
+  }, [ready, refresh]);
 
   if (bootErr) return <div className="boot">{bootErr}</div>;
   if (!ready || !settings) return <div className="boot">Menyiapkan kasir…</div>;
@@ -211,7 +223,7 @@ export default function App() {
   } else if (currentPage === "absen") {
     body = <AbsenPage tick={tick} onChange={refresh} />;
   } else if (currentPage === "laporan") {
-    body = <LaporanPage settings={settings} tick={tick} />;
+    body = <LaporanPage settings={settings} tick={tick} onChange={refresh} />;
   } else {
     body = (
       <PengaturanPage

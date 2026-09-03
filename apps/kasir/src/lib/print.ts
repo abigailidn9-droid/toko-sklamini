@@ -1,4 +1,4 @@
-import { EXPENSE_LABEL, PAY_METHOD_LABEL, formatDateTime, formatQty, ppnLabel, rp, saleMethodLabel, type Sale, type StoreSettings } from "@sklamini/shared";
+import { EXPENSE_FUND_LABEL, EXPENSE_LABEL, PAY_METHOD_LABEL, formatQty, ppnLabel, rp, saleMethodLabel, type Sale, type StoreSettings } from "@sklamini/shared";
 import { getMember, type ShiftSettlement } from "./repo.ts";
 import { drawerPrinterName } from "./cashDrawer.ts";
 import { tauriInvoke } from "./tauri.ts";
@@ -543,8 +543,8 @@ function sampleItem(id: string, name: string, qty: number, sellPrice: number): S
 export function printTestStruk(settings: StoreSettings): Promise<boolean> {
   const now = new Date().toISOString();
   const items = [
-    sampleItem("1", "Contoh Produk A", 2, 5000),
-    sampleItem("2", "Contoh Produk B", 1, 12500),
+    sampleItem("1", "Hot Wheels Basic", 2, 39000),
+    sampleItem("2", "Hot Wheels Premium", 1, 139000),
   ];
   const subtotal = items.reduce((n, it) => n + it.sellPrice * it.qty, 0);
   const sale: Sale = {
@@ -691,7 +691,8 @@ export function printSettlementStruk(data: ShiftSettlement, settings: StoreSetti
     )
     .join("");
   const expenseRows = data.expenses
-    .map((e) => `<tr><td>${esc(EXPENSE_LABEL[e.category])}</td><td class="r">${rp(e.amount)}</td></tr>`)
+    .filter((e) => e.fund === "laci")
+    .map((e) => `<tr><td>${esc(EXPENSE_LABEL[e.category])} · ${esc(EXPENSE_FUND_LABEL[e.fund])}</td><td class="r">${rp(e.amount)}</td></tr>`)
     .join("");
   printHtml(
     `Settlement ${buka.date}`,
@@ -729,7 +730,7 @@ export function printSettlementStruk(data: ShiftSettlement, settings: StoreSetti
           : ""
       }
       ${
-        data.expenses.length
+        expenseRows
           ? `<hr class="dash" /><div>PENGELUARAN</div><table class="sum">${expenseRows}${kvRow("Total keluar", rp(data.pengeluaran))}</table>`
           : ""
       }
@@ -754,163 +755,6 @@ export function printSettlementStruk(data: ShiftSettlement, settings: StoreSetti
   );
 }
 
-export function printSettlementDetail(data: ShiftSettlement, settings: StoreSettings) {
-  const { shift } = data;
-  const buka = formatDateTime(shift.openedAt);
-  const tutup = formatDateTime(shift.closedAt ?? new Date().toISOString());
-  const payRows = data.byMethod
-    .map(
-      (m) => `<tr><td>${esc(m.label)}</td><td class="r">${m.count}</td><td class="r">${rp(m.total)}</td></tr>`,
-    )
-    .join("");
-  const productRows = data.products
-    .map(
-      (p, i) => `<tr>
-        <td>${i + 1}</td>
-        <td>${esc(p.name)}<div class="muted">${esc(p.barcode)}</div></td>
-        <td class="r">${p.qty}</td>
-        <td class="r">${rp(p.total)}</td>
-      </tr>`,
-    )
-    .join("");
-  const saleBlocks = data.sales
-    .map((s) => {
-      const items = s.items
-        .map(
-          (it) => `<tr>
-            <td>${esc(it.name)}</td>
-            <td class="r">${it.qty} × ${rp(it.sellPrice)}</td>
-            <td class="r">${rp(it.sellPrice * it.qty)}</td>
-          </tr>`,
-        )
-        .join("");
-      return `<div class="sale-block">
-        <div class="meta"><b>${esc(s.localNo)}</b> · ${esc(formatDateTime(s.createdAt))} · ${esc(s.cashierName)} · ${esc(PAY_METHOD_LABEL[s.method])}</div>
-        <table class="grid">
-          ${items}
-          ${s.discount ? `<tr><td>Diskon</td><td></td><td class="r">-${rp(s.discount)}</td></tr>` : ""}
-          ${s.ppn ? `<tr><td>${esc(ppnLabel(s.ppnRate))}</td><td></td><td class="r">${rp(s.ppn)}</td></tr>` : ""}
-          ${s.deliveryCost ? `<tr><td>Ongkir</td><td></td><td class="r">${rp(s.deliveryCost)}</td></tr>` : ""}
-          <tr><td><b>Total</b></td><td></td><td class="r"><b>${rp(s.total)}</b></td></tr>
-        </table>
-      </div>`;
-    })
-    .join("");
-  const voidRows = data.voids
-    .map(
-      (s) => `<tr><td>${esc(s.localNo)}</td><td>${esc(formatDateTime(s.createdAt))}</td><td>${esc(PAY_METHOD_LABEL[s.method])}</td><td class="r">${rp(s.total)}</td></tr>`,
-    )
-    .join("");
-  const returRows = data.returns
-    .map(
-      (r) => `<tr>
-        <td>${esc(r.localNo)}</td>
-        <td>${esc(formatDateTime(r.createdAt))}</td>
-        <td>${esc(r.items.map((it) => `${it.name} ×${it.qty}`).join(", "))}</td>
-        <td>${esc(PAY_METHOD_LABEL[r.method])}</td>
-        <td class="r">${rp(r.total)}</td>
-      </tr>`,
-    )
-    .join("");
-  const expenseRows = data.expenses
-    .map(
-      (e) => `<tr>
-        <td>${esc(formatDateTime(e.createdAt))}</td>
-        <td>${esc(EXPENSE_LABEL[e.category])}</td>
-        <td>${esc(e.note || "—")}</td>
-        <td class="r">${rp(e.amount)}</td>
-      </tr>`,
-    )
-    .join("");
-
-  printHtml(
-    `Settlement ${buka}`,
-    `<div class="nota">
-      <div class="head">
-        ${logoTag(settings)}
-        <h1>${esc(settings.storeName)}</h1>
-        <div class="muted">${esc(settings.address)}${settings.phone ? ` · ${esc(settings.phone)}` : ""}</div>
-      </div>
-      <h2 class="sec-title">Settlement kasir</h2>
-      <table>
-        ${kvRow("Kasir", shift.cashierName)}
-        ${kvRow("Buka", buka)}
-        ${kvRow("Tutup", tutup)}
-        ${shift.note ? kvRow("Catatan", shift.note) : ""}
-      </table>
-      <hr class="dash" />
-      <div class="sec">Ringkasan</div>
-      <table>
-        ${kvRow("Jumlah nota", String(data.notaCount))}
-        ${kvRow("Qty barang", String(data.itemQty))}
-        ${kvRow("Subtotal", rp(data.subtotal))}
-        ${kvRow("Diskon", data.discount ? `-${rp(data.discount)}` : rp(0))}
-        ${kvRow("PPN", rp(data.ppn))}
-        ${kvRow("Ongkir", rp(data.ongkir))}
-        ${kvRow("Omzet", rp(data.omzet))}
-        ${kvRow("Retur", data.returTotal ? `-${rp(data.returTotal)}` : rp(0))}
-        ${kvRow("Void", data.voidTotal ? `-${rp(data.voidTotal)}` : rp(0))}
-      </table>
-      <div class="sec">Jenis pembayaran</div>
-      <table class="grid">
-        <thead><tr><th>Metode</th><th class="r">Nota</th><th class="r">Total</th></tr></thead>
-        <tbody>${payRows}<tr><td><b>Total</b></td><td class="r"><b>${data.notaCount}</b></td><td class="r"><b>${rp(data.omzet)}</b></td></tr></tbody>
-      </table>
-      <div class="sec">Laci</div>
-      <table>
-        ${kvRow("Kas awal", rp(shift.kasAwal))}
-        ${kvRow("Penjualan tunai", rp(data.tunaiMasuk))}
-        ${kvRow("Retur tunai", data.returTunai ? `-${rp(data.returTunai)}` : rp(0))}
-        ${kvRow("Pengeluaran", data.pengeluaran ? `-${rp(data.pengeluaran)}` : rp(0))}
-        ${kvRow("Seharusnya (sistem)", rp(shift.kasSistem ?? 0))}
-        ${kvRow("Hitung fisik", rp(shift.kasHitung ?? 0))}
-        ${kvRow("Selisih", signedRp(shift.selisih ?? 0))}
-      </table>
-      <div class="sec">Penjualan produk</div>
-      ${
-        data.products.length
-          ? `<table class="grid">
-              <thead><tr><th>No</th><th>Barang</th><th class="r">Qty</th><th class="r">Total</th></tr></thead>
-              <tbody>${productRows}</tbody>
-            </table>`
-          : `<p class="muted">Tidak ada penjualan produk.</p>`
-      }
-      <div class="sec">Detail nota</div>
-      ${data.sales.length ? saleBlocks : `<p class="muted">Tidak ada nota.</p>`}
-      ${
-        data.voids.length
-          ? `<div class="sec">Void</div>
-            <table class="grid">
-              <thead><tr><th>Nota</th><th>Waktu</th><th>Bayar</th><th class="r">Total</th></tr></thead>
-              <tbody>${voidRows}</tbody>
-            </table>`
-          : ""
-      }
-      ${
-        data.returns.length
-          ? `<div class="sec">Retur</div>
-            <table class="grid">
-              <thead><tr><th>No</th><th>Waktu</th><th>Barang</th><th>Bayar</th><th class="r">Nilai</th></tr></thead>
-              <tbody>${returRows}</tbody>
-            </table>`
-          : ""
-      }
-      ${
-        data.expenses.length
-          ? `<div class="sec">Pengeluaran</div>
-            <table class="grid">
-              <thead><tr><th>Waktu</th><th>Kategori</th><th>Catatan</th><th class="r">Jumlah</th></tr></thead>
-              <tbody>${expenseRows}<tr><td colspan="3"><b>Total</b></td><td class="r"><b>${rp(data.pengeluaran)}</b></td></tr></tbody>
-            </table>`
-          : ""
-      }
-      <p class="foot">${esc(settings.receiptFooter)}</p>
-    </div>`,
-    "nota",
-  );
-}
-
 export function printSettlement(data: ShiftSettlement, settings: StoreSettings) {
   printSettlementStruk(data, settings);
-  window.setTimeout(() => printSettlementDetail(data, settings), 700);
 }

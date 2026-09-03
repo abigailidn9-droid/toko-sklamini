@@ -1,0 +1,39 @@
+name: Release
+
+on:
+  push:
+    tags:
+      - "v*"
+
+permissions:
+  contents: write
+
+jobs:
+  windows:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+      - uses: dtolnay/rust-toolchain@stable
+      - name: Install dependencies
+        run: npm install
+      - uses: tauri-apps/tauri-action@v0
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        with:
+          projectPath: apps/kasir
+          tagName: ${{ github.ref_name }}
+          releaseName: TOKO SKLAMINI ${{ github.ref_name }}
+          releaseBody: |
+            Kasir Windows 1.4.0.
+
+            - Data toko (nota, restock, stok, opname, pengeluaran, absen) ikut sync antar komputer
+            - Unduh Excel dari halaman Produk
+            - Barang dummy tidak diisi lagi
+            - Reset kasir tidak menghapus data di server
+
+            Pasang di komputer toko sebagai update. Backup dulu (Pengaturan → Data → Unduh backup). Jangan hapus data lama.
+          releaseDraft: false
+          prerelease: false

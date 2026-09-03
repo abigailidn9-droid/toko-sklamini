@@ -1,14 +1,16 @@
 import { useMemo, useState } from "react";
 import {
   formatDateId,
+  formatRupiahInput,
   monthStartIso,
-  rp,
+  parseRupiah,
   todayIso,
   type StoreSettings,
 } from "@sklamini/shared";
 import { Button } from "../ui/primitives.tsx";
 import { PageShell } from "../components/PageHeader.tsx";
-import { reportSummary, stockReport } from "../lib/repo.ts";
+import { reportSummary, saveSettings, stockReport } from "../lib/repo.ts";
+import { useToast } from "../ui/toast.tsx";
 import { buildReportPdf, downloadPdf, type ReportPdfLine, type ReportPdfRow } from "../lib/pdf.ts";
 
 function rpAkun(n: number, asNegative = false) {
@@ -39,10 +41,13 @@ function rangeOf(mode: PeriodMode, from: string, to: string) {
 export function LaporanPage({
   settings,
   tick,
+  onChange,
 }: {
   settings: StoreSettings;
   tick: number;
+  onChange: () => void;
 }) {
+  const toast = useToast();
   const [tab, setTab] = useState<Tab>("laba");
   const [mode, setMode] = useState<PeriodMode>("hari");
   const [customFrom, setCustomFrom] = useState(todayIso());
@@ -51,6 +56,21 @@ export function LaporanPage({
     () => rangeOf(mode, customFrom, customTo),
     [mode, customFrom, customTo],
   );
+  const [openingStr, setOpeningStr] = useState(() =>
+    settings.bookOpening ? formatRupiahInput(String(settings.bookOpening)) : "",
+  );
+  const [openingDate, setOpeningDate] = useState(settings.bookOpeningDate || todayIso());
+
+  function saveOpening() {
+    const next = {
+      ...settings,
+      bookOpening: parseRupiah(openingStr),
+      bookOpeningDate: openingDate || todayIso(),
+    };
+    saveSettings(next);
+    onChange();
+    toast.show("Saldo awal tersimpan", "ok", `Pembukuan mulai ${formatDateId(next.bookOpeningDate)}`);
+  }
   const data = useMemo(() => reportSummary(range), [tick, range]);
   const stok = useMemo(() => stockReport(range), [tick, range]);
   const r = data.rincian;
@@ -154,7 +174,6 @@ export function LaporanPage({
               bold: row.no == null,
             })),
           },
-          note: `QRIS ${rp(data.arusKas.qris)} · Transfer ${rp(data.arusKas.transfer)} · Kartu ${rp(data.arusKas.kartu)} · Kas laci ${rp(data.arusKas.kasLaci)}`,
         }),
       );
       return;
@@ -183,6 +202,30 @@ export function LaporanPage({
       title="Laporan"
       hint="Laba rugi, arus kas, dan stok. Format A4."
       className="laporan-page"
+      actions={
+        <div className="laporan-opening">
+          <span>Saldo awal pembukuan</span>
+          <div className="laporan-opening-row">
+            <div className="money-field">
+              <span>Rp</span>
+              <input
+                className="field"
+                inputMode="numeric"
+                placeholder="0"
+                value={openingStr}
+                onChange={(e) => setOpeningStr(formatRupiahInput(e.target.value))}
+              />
+            </div>
+            <input
+              className="field"
+              type="date"
+              value={openingDate}
+              onChange={(e) => setOpeningDate(e.target.value || todayIso())}
+            />
+            <Button onClick={saveOpening}>Simpan</Button>
+          </div>
+        </div>
+      }
     >
       <div className="laporan-bar">
         <div className="tabs">
@@ -253,7 +296,7 @@ export function LaporanPage({
           {tab === "laba" ? (
             <LabaRugiSheet r={r} />
           ) : tab === "kas" ? (
-            <BukuKasSheet rows={data.bukuKas} kas={data.arusKas} />
+            <BukuKasSheet rows={data.bukuKas} />
           ) : (
             <StokSheet rows={stok.rows} totals={stok.totals} />
           )}
@@ -331,10 +374,8 @@ function LabaRugiSheet({
 
 function BukuKasSheet({
   rows,
-  kas,
 }: {
   rows: ReturnType<typeof reportSummary>["bukuKas"];
-  kas: ReturnType<typeof reportSummary>["arusKas"];
 }) {
   return (
     <div className="report-body">
@@ -362,27 +403,6 @@ function BukuKasSheet({
           ))}
         </tbody>
       </table>
-      <div className="buku-foot">
-        <div>
-          <span>QRIS</span>
-          <b className="tabular">{rp(kas.qris)}</b>
-        </div>
-        <div>
-          <span>Transfer</span>
-          <b className="tabular">{rp(kas.transfer)}</b>
-        </div>
-        <div>
-          <span>Kartu</span>
-          <b className="tabular">{rp(kas.kartu)}</b>
-        </div>
-        <div>
-          <span>Kas laci</span>
-          <b className="tabular">{rp(kas.kasLaci)}</b>
-        </div>
-      </div>
-      <p className="buku-note">
-        Hanya tunai di laci. Saldo awal dari kas awal shift pertama. QRIS, transfer, dan kartu tidak masuk saldo.
-      </p>
     </div>
   );
 }

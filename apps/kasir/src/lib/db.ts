@@ -181,6 +181,7 @@ function migrateSchema(database: SqlJsDatabase) {
   addCol(database, "sales", "ppn_rate", "ppn_rate REAL NOT NULL DEFAULT 0");
   addCol(database, "sales", "customer_id", "customer_id TEXT");
   addCol(database, "sales", "voided_at", "voided_at TEXT");
+  addCol(database, "expenses", "fund", "fund TEXT NOT NULL DEFAULT 'laci'");
   database.run(`UPDATE users SET pin = '' WHERE pin IS NOT NULL AND pin != ''`);
 }
 

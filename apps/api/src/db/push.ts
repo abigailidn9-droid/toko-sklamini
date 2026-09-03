@@ -72,6 +72,7 @@ export async function pushSchema() {
       category text NOT NULL,
       amount integer NOT NULL,
       note text NOT NULL,
+      fund text NOT NULL DEFAULT 'laci',
       created_at timestamptz NOT NULL,
       cashier_name text NOT NULL
     );
@@ -191,6 +192,7 @@ export async function pushSchema() {
     ALTER TABLE sales ADD COLUMN IF NOT EXISTS note text NOT NULL DEFAULT '';
     ALTER TABLE sales ADD COLUMN IF NOT EXISTS customer_id text;
     ALTER TABLE sales ADD COLUMN IF NOT EXISTS voided_at timestamptz;
+    ALTER TABLE expenses ADD COLUMN IF NOT EXISTS fund text NOT NULL DEFAULT 'laci';
     ALTER TABLE stock_events ALTER COLUMN qty TYPE double precision;
     ALTER TABLE sale_items ALTER COLUMN qty TYPE double precision;
     ALTER TABLE stock_in_items ALTER COLUMN qty TYPE double precision;

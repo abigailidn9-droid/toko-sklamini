@@ -1,15 +1,27 @@
-import { useEffect, useMemo, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import type { StoreSettings, UserRole } from "@sklamini/shared";
 import { bluetoothSupported, scanBluetoothPrinters, type BtPrinter } from "../lib/bluetoothPrinters.ts";
 import { cashDrawerSupported, listWindowsPrinters, openCashDrawer, type WinPrinter } from "../lib/cashDrawer.ts";
-import { exportBackup, importBackup } from "../lib/db.ts";
+import { persistNow, exportBackup, importBackup } from "../lib/db.ts";
 import { printTestStruk } from "../lib/print.ts";
-import { findProductByBarcode, listUsers, saveSettings, upsertUser, type Session } from "../lib/repo.ts";
+import {
+  RESET_KIND_LABEL,
+  RESET_KINDS,
+  findProductByBarcode,
+  listUsers,
+  ownerPinOk,
+  resetLocalData,
+  saveSettings,
+  upsertUser,
+  type ResetKind,
+  type Session,
+} from "../lib/repo.ts";
+import { syncNow } from "../lib/sync.ts";
 import { listScanners, scannerKindLabel, scannersSupported, type WinScanner } from "../lib/scanners.ts";
 import { scanBeep } from "../lib/beep.ts";
 import { useScanFocus } from "../lib/useScanFocus.ts";
 import { NAV, defaultMenus, type Page } from "../types.ts";
-import { Button, Field, H2, Select, Text } from "../ui/primitives.tsx";
+import { Button, Field, H2, PinDots, PinPad, Select, Text } from "../ui/primitives.tsx";
 import { PageHeader } from "../components/PageHeader.tsx";
 import { useToast } from "../ui/toast.tsx";
 
@@ -23,7 +35,7 @@ const SECTIONS: { id: Section; label: string; hint: string }[] = [
   { id: "pembayaran", label: "Pembayaran", hint: "Rekening hanya untuk pembayaran transfer." },
   { id: "pajak", label: "PPN", hint: "Ditambah di keranjang, struk, dan nota." },
   { id: "pengguna", label: "Pengguna & PIN", hint: "Setiap user punya PIN dan menu sendiri." },
-  { id: "data", label: "Data", hint: "Backup dan pulihkan database." },
+  { id: "data", label: "Data", hint: "Backup, pulihkan, dan reset data toko." },
 ];
 
 async function fileToLogo(file: File): Promise<string> {
@@ -103,7 +115,7 @@ export function PengaturanPage({
   return (
     <div className="settings-wrap">
       <PageHeader page="pengaturan" title="Pengaturan" hint={current.hint}>
-        {section !== "pengguna" ? (
+        {section !== "pengguna" && section !== "data" ? (
           <Button variant="primary" onClick={save}>
             Simpan
           </Button>
@@ -245,33 +257,36 @@ export function PengaturanPage({
             <UsersSection session={session} onSessionChange={onSessionChange} />
           ) : null}
           {section === "data" ? (
-            <div className="settings-card">
-              <div className="settings-data">
-                <div>
-                  <b>Backup database</b>
-                  <span>Unduh salinan SQLite dari komputer ini.</span>
+            <div className="settings-stack">
+              <div className="settings-card">
+                <div className="settings-data">
+                  <div>
+                    <b>Backup database</b>
+                    <span>Unduh salinan SQLite dari komputer ini.</span>
+                  </div>
+                  <Button onClick={() => void backup()}>Unduh backup</Button>
                 </div>
-                <Button onClick={() => void backup()}>Unduh backup</Button>
-              </div>
-              <div className="settings-data">
-                <div>
-                  <b>Pulihkan backup</b>
-                  <span>Ganti data kasir ini dengan file SQLite. Tidak bisa dibatalkan.</span>
+                <div className="settings-data">
+                  <div>
+                    <b>Pulihkan backup</b>
+                    <span>Ganti data kasir ini dengan file SQLite. Tidak bisa dibatalkan.</span>
+                  </div>
+                  <label className="logo-file">
+                    Pilih file
+                    <input
+                      type="file"
+                      accept=".sqlite,.db,application/octet-stream"
+                      hidden
+                      onChange={(e) => {
+                        const file = e.target.files?.[0];
+                        e.target.value = "";
+                        if (file) void restore(file);
+                      }}
+                    />
+                  </label>
                 </div>
-                <label className="logo-file">
-                  Pilih file
-                  <input
-                    type="file"
-                    accept=".sqlite,.db,application/octet-stream"
-                    hidden
-                    onChange={(e) => {
-                      const file = e.target.files?.[0];
-                      e.target.value = "";
-                      if (file) void restore(file);
-                    }}
-                  />
-                </label>
               </div>
+              <DataResetCard />
             </div>
           ) : null}
           </div>
@@ -773,5 +788,166 @@ function UsersSection({
         </div>
       ) : null}
     </div>
+  );
+}
+
+const RESET_OPTIONS: { id: ResetKind; hint: string }[] = [
+  { id: "transaksi", hint: "Nota, retur, draft, dan settlement. Stok dari penjualan dikembalikan." },
+  { id: "produk", hint: "Katalog, restock, dan opname." },
+  { id: "member", hint: "Daftar member dan hadiah." },
+  { id: "pengeluaran", hint: "Catatan pengeluaran toko." },
+  { id: "absen", hint: "Catatan masuk/pulang. Daftar karyawan tetap ada." },
+];
+
+function DataResetCard() {
+  const toast = useToast();
+  const [picked, setPicked] = useState<ResetKind[]>([]);
+  const [pinOpen, setPinOpen] = useState(false);
+  const [pin, setPin] = useState("");
+  const [bad, setBad] = useState(false);
+  const [busy, setBusy] = useState(false);
+  const locking = useRef(false);
+
+  const allOn = picked.length === RESET_KINDS.length;
+
+  function toggle(kind: ResetKind) {
+    setPicked((cur) => (cur.includes(kind) ? cur.filter((k) => k !== kind) : [...cur, kind]));
+  }
+
+  function closePin() {
+    locking.current = false;
+    setPinOpen(false);
+    setPin("");
+    setBad(false);
+  }
+
+  async function confirm(current: string) {
+    if (current.length !== 6 || locking.current || busy) return;
+    locking.current = true;
+    const ok = await ownerPinOk(current);
+    if (!ok) {
+      locking.current = false;
+      setBad(true);
+      setPin("");
+      toast.show("PIN owner salah", "error", "Reset dibatalkan.");
+      return;
+    }
+    setBusy(true);
+    const res = resetLocalData(picked);
+    if (!res.ok) {
+      setBusy(false);
+      locking.current = false;
+      toast.show("Tidak terhapus", "error", res.error);
+      closePin();
+      return;
+    }
+    await persistNow();
+    void syncNow();
+    toast.show("Data direset", "ok", res.labels.join(", "));
+    window.setTimeout(() => window.location.reload(), 500);
+  }
+
+  useEffect(() => {
+    if (!pinOpen) return;
+    function onKey(e: KeyboardEvent) {
+      if (e.key >= "0" && e.key <= "9") {
+        e.preventDefault();
+        setBad(false);
+        setPin((p) => (p.length >= 6 ? p : p + e.key));
+        return;
+      }
+      if (e.key === "Backspace") {
+        e.preventDefault();
+        setPin((p) => p.slice(0, -1));
+      }
+      if (e.key === "Escape") {
+        e.preventDefault();
+        closePin();
+      }
+    }
+    window.addEventListener("keydown", onKey);
+    return () => window.removeEventListener("keydown", onKey);
+  }, [pinOpen]);
+
+  useEffect(() => {
+    if (!pinOpen || pin.length !== 6) return;
+    void confirm(pin);
+  }, [pin, pinOpen]);
+
+  return (
+    <>
+      <div className="settings-card">
+        <div className="settings-card-head">
+          <div>
+            <b>Reset data</b>
+            <span>Hapus data terpilih dari kasir ini. Tidak bisa dibatalkan. Backup dulu.</span>
+          </div>
+        </div>
+        <div className="reset-opts">
+          <button type="button" className="reset-all" onClick={() => setPicked(allOn ? [] : [...RESET_KINDS])}>
+            {allOn ? "Hapus semua pilihan" : "Pilih semua"}
+          </button>
+          {RESET_OPTIONS.map((opt) => {
+            const on = picked.includes(opt.id);
+            return (
+              <label key={opt.id} className={`reset-opt${on ? " on" : ""}`}>
+                <input type="checkbox" checked={on} onChange={() => toggle(opt.id)} />
+                <span>
+                  <b>{RESET_KIND_LABEL[opt.id]}</b>
+                  <span>{opt.hint}</span>
+                </span>
+              </label>
+            );
+          })}
+        </div>
+        <Button
+          variant="danger"
+          disabled={!picked.length || busy}
+          onClick={() => {
+            setPin("");
+            setBad(false);
+            setPinOpen(true);
+          }}
+        >
+          Reset data terpilih
+        </Button>
+      </div>
+      {pinOpen ? (
+        <div className="overlay overlay-pin" style={{ position: "fixed", inset: 0, zIndex: 40 }}>
+          <div className="modal pin-modal">
+            <div className="stack">
+              <div className="row">
+                <H2>Reset data</H2>
+                <span className="grow" />
+                <Button variant="ghost" onClick={closePin} disabled={busy}>
+                  Tutup
+                </Button>
+              </div>
+              <Text tone="secondary">
+                Masukkan PIN owner. Akan dihapus: {picked.map((k) => RESET_KIND_LABEL[k]).join(", ")}.
+              </Text>
+              <PinDots length={pin.length} />
+              {bad ? (
+                <p className="muted" style={{ color: "var(--danger)", margin: 0 }}>
+                  PIN owner salah.
+                </p>
+              ) : null}
+              <PinPad
+                onDigit={(d) => {
+                  if (busy) return;
+                  setBad(false);
+                  setPin((p) => (p.length >= 6 ? p : p + d));
+                }}
+                onClear={() => {
+                  setPin("");
+                  setBad(false);
+                }}
+                onBack={() => setPin((p) => p.slice(0, -1))}
+              />
+            </div>
+          </div>
+        </div>
+      ) : null}
+    </>
   );
 }

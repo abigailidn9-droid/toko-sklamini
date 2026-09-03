@@ -1,11 +1,16 @@
 import {
   arusKas,
   DEFAULT_SETTINGS,
+  SAMPLE_PRODUCTS,
   EXPENSE_CATEGORIES,
   EXPENSE_LABEL,
+  EXPENSE_FUND_LABEL,
+  asExpenseFund,
   PAY_METHODS,
   PAY_METHOD_LABEL,
   hashPin,
+  saleMethodLabel,
+  salePaymentsOf,
   labaRugi,
   lineRefund,
   localDayFromIso,
@@ -20,6 +25,7 @@ import {
   type Employee,
   type Expense,
   type ExpenseCategory,
+  type ExpenseFund,
   type PayMethod,
   type Product,
   type Sale,
@@ -31,7 +37,7 @@ import {
   type Member,
   type MemberFee,
   type MemberReward,
-  MEMBER_FEE,
+  MEMBER_MIN_SPEND,
   MEMBER_VISIT_GOAL,
   type StoreSettings,
   type UserRole,
@@ -97,6 +103,22 @@ function enqueue(entity: string, payload: unknown): void {
   run(
     `INSERT INTO sync_outbox (id, entity, payload, created_at, attempts) VALUES (?, ?, ?, ?, 0)`,
     [newId(), entity, JSON.stringify(payload), new Date().toISOString()],
+  );
+}
+
+function eventsOfRef(refId: string) {
+  return all<{
+    id: string;
+    productId: string;
+    type: string;
+    qty: number;
+    refId: string | null;
+    deviceId: string;
+    createdAt: string;
+  }>(
+    `SELECT id, product_id AS productId, type, qty, ref_id AS refId, device_id AS deviceId, created_at AS createdAt
+     FROM stock_events WHERE ref_id = ?`,
+    [refId],
   );
 }
 
@@ -283,11 +305,14 @@ function digitsPhone(raw: string): string {
   return raw.replace(/\D/g, "");
 }
 
-function mapMember(r: { id: string; name: string; phone: string; active: number; updated_at: string }): Member {
+type MemberRow = { id: string; name: string; phone: string; note: string; active: number; updated_at: string };
+
+function mapMember(r: MemberRow): Member {
   return {
     id: r.id,
     name: r.name,
     phone: r.phone,
+    note: r.note ?? "",
     active: r.active === 1,
     updatedAt: r.updated_at,
   };
@@ -295,14 +320,14 @@ function mapMember(r: { id: string; name: string; phone: string; active: number;
 
 export function listMembers(includeInactive = false): Member[] {
   const sql = includeInactive
-    ? `SELECT id, name, phone, active, updated_at FROM customers ORDER BY name`
-    : `SELECT id, name, phone, active, updated_at FROM customers WHERE active = 1 ORDER BY name`;
-  return all<{ id: string; name: string; phone: string; active: number; updated_at: string }>(sql).map(mapMember);
+    ? `SELECT id, name, phone, note, active, updated_at FROM customers ORDER BY name`
+    : `SELECT id, name, phone, note, active, updated_at FROM customers WHERE active = 1 ORDER BY name`;
+  return all<MemberRow>(sql).map(mapMember);
 }
 
 export function getMember(id: string): Member | null {
-  const row = one<{ id: string; name: string; phone: string; active: number; updated_at: string }>(
-    `SELECT id, name, phone, active, updated_at FROM customers WHERE id = ?`,
+  const row = one<MemberRow>(
+    `SELECT id, name, phone, note, active, updated_at FROM customers WHERE id = ?`,
     [id],
   );
   return row ? mapMember(row) : null;
@@ -374,45 +399,93 @@ export function listMemberFees(): MemberFee[] {
 export function registerMember(input: {
   name: string;
   phone: string;
-  method: PayMethod;
-  cashier: Session;
+  saleId: string;
 }): { ok: true; member: Member } | { ok: false; error: string } {
-  if (!currentOpenShift()) {
-    return { ok: false, error: "Buka kasir dulu sebelum daftar member." };
+  const sale = getSale(input.saleId);
+  if (!sale || sale.status !== "selesai") return { ok: false, error: "Nota tidak ditemukan" };
+  if (sale.customerId) return { ok: false, error: "Nota ini sudah punya member" };
+  if (sale.total < MEMBER_MIN_SPEND) {
+    return { ok: false, error: `Syarat daftar: belanja minimal ${formatMinSpend()}` };
   }
-  const name = input.name.trim();
-  const phone = digitsPhone(input.phone);
+  const created = createMemberRecord(input.name, input.phone);
+  if (!created.ok) return created;
+  run(`UPDATE sales SET customer_id = ? WHERE id = ?`, [created.member.id, sale.id]);
+  return created;
+}
+
+function formatMinSpend() {
+  return `Rp${MEMBER_MIN_SPEND.toLocaleString("id-ID")}`;
+}
+
+function createMemberRecord(
+  rawName: string,
+  rawPhone: string,
+): { ok: true; member: Member } | { ok: false; error: string } {
+  const name = rawName.trim();
+  const phone = digitsPhone(rawPhone);
   if (!name) return { ok: false, error: "Nama wajib diisi" };
   if (phone.length < 8) return { ok: false, error: "Nomor telepon tidak valid" };
-  const clash = one<{ id: string }>(`SELECT id FROM customers WHERE phone = ?`, [phone]);
+  const clash = one<{ id: string }>(`SELECT id FROM customers WHERE phone = ? AND active = 1`, [phone]);
   if (clash) return { ok: false, error: "Nomor telepon sudah terdaftar" };
   const now = new Date().toISOString();
-  const id = newId();
-  const feeId = newId();
-  const member: Member = { id, name, phone, active: true, updatedAt: now };
-  tx(() => {
-    run(
-      `INSERT INTO customers (id, name, phone, note, active, updated_at) VALUES (?, ?, ?, '', 1, ?)`,
-      [id, name, phone, now],
-    );
-    run(
-      `INSERT INTO customer_payments (id, customer_id, amount, method, note, created_at, cashier_id, cashier_name)
-       VALUES (?, ?, ?, ?, 'Pendaftaran member', ?, ?, ?)`,
-      [feeId, id, MEMBER_FEE, input.method, now, input.cashier.id, input.cashier.name],
-    );
-    enqueue("customer", member);
-    enqueue("customer_payment", {
-      id: feeId,
-      customerId: id,
-      amount: MEMBER_FEE,
-      method: input.method,
-      note: "Pendaftaran member",
-      createdAt: now,
-      cashierId: input.cashier.id,
-      cashierName: input.cashier.name,
-    });
-  });
+  const member: Member = { id: newId(), name, phone, note: "", active: true, updatedAt: now };
+  run(
+    `INSERT INTO customers (id, name, phone, note, active, updated_at) VALUES (?, ?, ?, '', 1, ?)`,
+    [member.id, name, phone, now],
+  );
+  enqueue("customer", member);
   return { ok: true, member };
+}
+
+export function listEligibleJoinSales(): { id: string; localNo: string; total: number; createdAt: string }[] {
+  return all<{ id: string; local_no: string; total: number; created_at: string }>(
+    `SELECT id, local_no, total, created_at FROM sales
+     WHERE status = 'selesai' AND (customer_id IS NULL OR customer_id = '') AND total >= ?
+     ORDER BY created_at DESC LIMIT 40`,
+    [MEMBER_MIN_SPEND],
+  ).map((r) => ({ id: r.id, localNo: r.local_no, total: r.total, createdAt: r.created_at }));
+}
+
+export function updateMember(input: {
+  id: string;
+  name: string;
+  phone: string;
+  note?: string;
+}): { ok: true; member: Member } | { ok: false; error: string } {
+  const member = getMember(input.id);
+  if (!member) return { ok: false, error: "Member tidak ditemukan" };
+  if (!member.active) return { ok: false, error: "Member sudah dihapus" };
+  const name = input.name.trim();
+  const phone = digitsPhone(input.phone);
+  const note = (input.note ?? member.note).trim();
+  if (!name) return { ok: false, error: "Nama wajib diisi" };
+  if (phone.length < 8) return { ok: false, error: "Nomor telepon tidak valid" };
+  const clash = one<{ id: string }>(
+    `SELECT id FROM customers WHERE phone = ? AND active = 1 AND id != ?`,
+    [phone, input.id],
+  );
+  if (clash) return { ok: false, error: "Nomor telepon sudah terdaftar" };
+  const now = new Date().toISOString();
+  const next: Member = { ...member, name, phone, note, updatedAt: now };
+  run(`UPDATE customers SET name = ?, phone = ?, note = ?, updated_at = ? WHERE id = ?`, [
+    name,
+    phone,
+    note,
+    now,
+    input.id,
+  ]);
+  enqueue("customer", next);
+  return { ok: true, member: next };
+}
+
+export function deactivateMember(id: string): { ok: true } | { ok: false; error: string } {
+  const member = getMember(id);
+  if (!member) return { ok: false, error: "Member tidak ditemukan" };
+  if (!member.active) return { ok: false, error: "Member sudah dihapus" };
+  const now = new Date().toISOString();
+  run(`UPDATE customers SET active = 0, updated_at = ? WHERE id = ?`, [now, id]);
+  enqueue("customer", { ...member, active: false, updatedAt: now });
+  return { ok: true };
 }
 
 export function redeemMemberReward(input: {
@@ -573,6 +646,102 @@ export function upsertProduct(input: {
   return { ok: true, id };
 }
 
+export function deactivateProduct(id: string): { ok: true } | { ok: false; error: string } {
+  const product = getProduct(id);
+  if (!product) return { ok: false, error: "Produk tidak ditemukan" };
+  if (!product.active) return { ok: false, error: "Produk sudah dihapus" };
+  const now = new Date().toISOString();
+  const suffix = `~${id.slice(0, 8)}`;
+  const barcode = product.barcode.endsWith(suffix) ? product.barcode : `${product.barcode}${suffix}`;
+  run(`UPDATE products SET active = 0, barcode = ?, updated_at = ? WHERE id = ?`, [barcode, now, id]);
+  enqueue("product", {
+    id,
+    barcode,
+    name: product.name,
+    unit: product.unit,
+    category: product.category,
+    buyPrice: product.buyPrice,
+    sellPrice: product.sellPrice,
+    active: false,
+    updatedAt: now,
+  });
+  return { ok: true };
+}
+
+export const RESET_KINDS = ["transaksi", "produk", "member", "pengeluaran", "absen"] as const;
+export type ResetKind = (typeof RESET_KINDS)[number];
+
+export const RESET_KIND_LABEL: Record<ResetKind, string> = {
+  transaksi: "Riwayat transaksi",
+  produk: "Produk",
+  member: "Member",
+  pengeluaran: "Pengeluaran",
+  absen: "Absen",
+};
+
+const RESET_OUTBOX: Record<ResetKind, string[]> = {
+  transaksi: ["sale", "sale_void", "sale_return", "cash_shift"],
+  produk: ["product", "stock_in", "stock_in_delete", "opname"],
+  member: ["customer", "customer_payment", "member_reward"],
+  pengeluaran: ["expense", "expense_delete"],
+  absen: ["attendance"],
+};
+
+export function resetLocalData(kinds: ResetKind[]): { ok: true; labels: string[] } | { ok: false; error: string } {
+  const selected = RESET_KINDS.filter((k) => kinds.includes(k));
+  if (!selected.length) return { ok: false, error: "Pilih data yang ingin direset." };
+
+  tx(() => {
+    const dropOutbox = new Set(selected.flatMap((k) => RESET_OUTBOX[k]));
+    if (dropOutbox.size) {
+      run(
+        `DELETE FROM sync_outbox WHERE entity IN (${[...dropOutbox].map(() => "?").join(",")})`,
+        [...dropOutbox],
+      );
+    }
+
+    if (selected.includes("transaksi")) {
+      run(`DELETE FROM sale_payments`);
+      run(`DELETE FROM sale_items`);
+      run(`DELETE FROM sales`);
+      run(`DELETE FROM return_items`);
+      run(`DELETE FROM returns`);
+      run(`DELETE FROM drafts`);
+      run(`DELETE FROM cash_shifts`);
+      run(`DELETE FROM stock_events WHERE type IN ('sale', 'sale_void', 'return')`);
+    }
+
+    if (selected.includes("produk")) {
+      run(`DELETE FROM stock_in_items`);
+      run(`DELETE FROM stock_ins`);
+      run(`DELETE FROM opname_items`);
+      run(`DELETE FROM opnames`);
+      run(`DELETE FROM products`);
+      run(`DELETE FROM stock_events WHERE type IN ('stock_in', 'adjust')`);
+      run(`DELETE FROM stock_events WHERE product_id NOT IN (SELECT id FROM products)`);
+    }
+
+    if (selected.includes("member")) {
+      run(`DELETE FROM customer_payments`);
+      run(`DELETE FROM member_rewards`);
+      run(`DELETE FROM customers`);
+      run(`UPDATE sales SET customer_id = NULL`);
+    }
+
+    if (selected.includes("pengeluaran")) {
+      run(`DELETE FROM expenses`);
+    }
+
+    if (selected.includes("absen")) {
+      run(`DELETE FROM attendances`);
+    }
+
+    enqueue("data_reset", { kinds: selected, at: new Date().toISOString() });
+  });
+
+  return { ok: true, labels: selected.map((k) => RESET_KIND_LABEL[k]) };
+}
+
 export function nextLocalNo(prefix: string, table: "sales" | "stock_ins" | "returns" | "opnames"): string {
   const today = todayIso();
   let max = 0;
@@ -606,6 +775,7 @@ export function checkout(input: {
   ppnRate?: number;
   note?: string;
   customerId?: string | null;
+  newMember?: { name: string; phone: string } | null;
   payments?: { method: PayMethod; amount: number }[];
 }): Sale {
   if (!currentOpenShift()) {
@@ -644,7 +814,15 @@ export function checkout(input: {
   const id = newId();
   const local = nextLocalNo("SKL", "sales");
   const changeAmount = method === "tunai" && tunaiNeed > 0 ? Math.max(0, paid - tunaiNeed) : 0;
-  const customerId = input.customerId?.trim() || null;
+  let customerId = input.customerId?.trim() || null;
+  if (input.newMember) {
+    if (total < MEMBER_MIN_SPEND) {
+      throw new Error(`Daftar member gratis mulai belanja Rp${MEMBER_MIN_SPEND.toLocaleString("id-ID")}`);
+    }
+    const created = createMemberRecord(input.newMember.name, input.newMember.phone);
+    if (!created.ok) throw new Error(created.error);
+    customerId = created.member.id;
+  }
   const items: SaleItem[] = input.lines.map((l) => ({
     id: newId(),
     saleId: id,
@@ -1050,7 +1228,7 @@ export function expectedDrawer(fromIso: string, toIso?: string): number {
     .filter((r) => r.createdAt >= fromIso && r.createdAt <= to)
     .reduce((n, r) => n + tunaiOutForReturn(r.total, getSale(r.saleId)), 0);
   const keluar = listExpenses()
-    .filter((e) => e.createdAt >= fromIso && e.createdAt <= to)
+    .filter((e) => e.fund === "laci" && e.createdAt >= fromIso && e.createdAt <= to)
     .reduce((n, e) => n + e.amount, 0);
   const memberTunai = listMemberFees()
     .filter((f) => f.createdAt >= fromIso && f.createdAt <= to && f.method === "tunai")
@@ -1197,7 +1375,7 @@ export function shiftSettlement(shift: CashShift): ShiftSettlement {
     .sort((a, b) => a.name.localeCompare(b.name, "id"));
   const tunaiMasuk = byMethod.find((m) => m.method === "tunai")?.total ?? 0;
   const returTunai = returns.filter((r) => r.method === "tunai").reduce((n, r) => n + r.total, 0);
-  const pengeluaran = expenses.reduce((n, e) => n + e.amount, 0);
+  const pengeluaran = expenses.filter((e) => e.fund === "laci").reduce((n, e) => n + e.amount, 0);
   return {
     shift,
     sales,
@@ -1581,6 +1759,7 @@ export function addExpense(input: {
   category: ExpenseCategory;
   amount: number;
   note: string;
+  fund: ExpenseFund;
   cashierName: string;
 }): void {
   const row: Expense = {
@@ -1588,21 +1767,74 @@ export function addExpense(input: {
     category: input.category,
     amount: input.amount,
     note: input.note,
+    fund: asExpenseFund(input.fund),
     createdAt: new Date().toISOString(),
     cashierName: input.cashierName,
   };
   run(
-    `INSERT INTO expenses (id, category, amount, note, created_at, cashier_name) VALUES (?, ?, ?, ?, ?, ?)`,
-    [row.id, row.category, row.amount, row.note, row.createdAt, row.cashierName],
+    `INSERT INTO expenses (id, category, amount, note, fund, created_at, cashier_name) VALUES (?, ?, ?, ?, ?, ?, ?)`,
+    [row.id, row.category, row.amount, row.note, row.fund, row.createdAt, row.cashierName],
   );
   enqueue("expense", row);
 }
 
+export function updateExpense(input: {
+  id: string;
+  category: ExpenseCategory;
+  amount: number;
+  note: string;
+  fund: ExpenseFund;
+}): { ok: true } | { ok: false; error: string } {
+  const existing = one<{
+    id: string;
+    created_at: string;
+    cashier_name: string;
+  }>(`SELECT id, created_at, cashier_name FROM expenses WHERE id = ?`, [input.id]);
+  if (!existing) return { ok: false, error: "Pengeluaran tidak ditemukan" };
+  const row: Expense = {
+    id: existing.id,
+    category: input.category,
+    amount: input.amount,
+    note: input.note,
+    fund: asExpenseFund(input.fund),
+    createdAt: existing.created_at,
+    cashierName: existing.cashier_name,
+  };
+  run(`UPDATE expenses SET category = ?, amount = ?, note = ?, fund = ? WHERE id = ?`, [
+    row.category,
+    row.amount,
+    row.note,
+    row.fund,
+    row.id,
+  ]);
+  enqueue("expense", row);
+  return { ok: true };
+}
+
+export function deleteExpense(id: string): { ok: true } | { ok: false; error: string } {
+  const existing = one<{ id: string }>(`SELECT id FROM expenses WHERE id = ?`, [id]);
+  if (!existing) return { ok: false, error: "Pengeluaran tidak ditemukan" };
+  run(`DELETE FROM expenses WHERE id = ?`, [id]);
+  enqueue("expense_delete", { id });
+  return { ok: true };
+}
+
 export function listExpenses(): Expense[] {
-  return all<Expense>(
-    `SELECT id, category, amount, note, created_at AS createdAt, cashier_name AS cashierName
+  return all<{
+    id: string;
+    category: ExpenseCategory;
+    amount: number;
+    note: string;
+    fund?: string;
+    createdAt: string;
+    cashierName: string;
+  }>(
+    `SELECT id, category, amount, note, fund, created_at AS createdAt, cashier_name AS cashierName
      FROM expenses ORDER BY created_at DESC`,
-  );
+  ).map((r) => ({
+    ...r,
+    fund: asExpenseFund(r.fund),
+  }));
 }
 
 export function listEmployees(includeInactive = false): Employee[] {
@@ -1766,6 +1998,48 @@ export function ensureCloudSettings(): void {
   saveSettings(loadSettings());
 }
 
+function dayBeforeIso(iso: string): string {
+  const [y, m, d] = iso.split("-").map(Number);
+  const dt = new Date(y, (m || 1) - 1, d || 1);
+  dt.setDate(dt.getDate() - 1);
+  return todayIso(dt);
+}
+
+function saleCashIn(sale: Sale): number {
+  return salePaymentsOf(sale).reduce((n, p) => n + p.amount, 0);
+}
+
+function cashBookNet(from: string, to: string): number {
+  if (from > to) return 0;
+  let n = 0;
+  for (const s of listSales("all")) {
+    if (inIsoRange(s.createdAt, from, to)) n += saleCashIn(s);
+    if (s.status === "void" && s.voidedAt && inIsoRange(s.voidedAt, from, to)) n -= saleCashIn(s);
+  }
+  for (const r of listReturns()) {
+    if (inIsoRange(r.createdAt, from, to)) n -= r.total;
+  }
+  for (const e of listExpenses()) {
+    if (inIsoRange(e.createdAt, from, to)) n -= e.amount;
+  }
+  for (const f of listMemberFees()) {
+    if (inIsoRange(f.createdAt, from, to)) n += f.amount;
+  }
+  return n;
+}
+
+function periodKasAwal(from: string, shiftKasAwal: number): number {
+  const s = loadSettings();
+  const start = (s.bookOpeningDate || "").trim();
+  if (!/^\d{4}-\d{2}-\d{2}$/.test(start)) return shiftKasAwal;
+  let opening = Math.max(0, Math.round(s.bookOpening || 0));
+  if (from > start) {
+    const priorTo = dayBeforeIso(from);
+    if (priorTo >= start) opening += cashBookNet(start, priorTo);
+  }
+  return opening;
+}
+
 export function reportSummary(range: { from: string; to: string }) {
   const { from, to } = range;
   const sales = listSales("all").filter((s) => inIsoRange(s.createdAt, from, to));
@@ -1801,7 +2075,8 @@ export function reportSummary(range: { from: string; to: string }) {
     status: s.status,
     hpp: s.items.reduce((n, it) => n + it.costPrice * it.qty, 0),
   }));
-  const kasAwal = shifts[0] ? [...shifts].sort((a, b) => a.openedAt.localeCompare(b.openedAt))[0].kasAwal : 0;
+  const shiftKasAwal = shifts[0] ? [...shifts].sort((a, b) => a.openedAt.localeCompare(b.openedAt))[0].kasAwal : 0;
+  const kasAwal = periodKasAwal(from, shiftKasAwal);
   const payAmt = (list: Sale[], method: PayMethod) =>
     list.reduce((n, s) => n + s.payments.filter((p) => p.method === method).reduce((m, p) => m + p.amount, 0), 0);
   const tunaiMasuk = payAmt(selesai, "tunai");
@@ -1824,33 +2099,58 @@ export function reportSummary(range: { from: string; to: string }) {
     (n, s) => n + s.payments.filter((p) => p.method === "tunai").reduce((m, p) => m + p.amount, 0),
     0,
   );
-  kas.kasLaci = kasAwal + kas.tunaiMasuk - tunaiRetur - tunaiVoid - kas.kasKeluar;
+  const laciKeluar = expenses.filter((e) => e.fund === "laci").reduce((n, e) => n + e.amount, 0);
+  kas.kasKeluar = laciKeluar;
+  kas.kasLaci = kasAwal + kas.tunaiMasuk - tunaiRetur - tunaiVoid - laciKeluar;
 
   type Raw = { at: string; ket: string; debit: number; kredit: number };
   const raw: Raw[] = [];
   for (const s of listSales("all").filter((s) => inIsoRange(s.createdAt, from, to))) {
-    const tunai = s.payments.filter((p) => p.method === "tunai").reduce((n, p) => n + p.amount, 0);
-    if (tunai) raw.push({ at: s.createdAt, ket: `Penjualan: ${s.localNo}`, debit: tunai, kredit: 0 });
+    const masuk = saleCashIn(s);
+    if (masuk) {
+      raw.push({
+        at: s.createdAt,
+        ket: `Penjualan: ${s.localNo} · ${saleMethodLabel(s)}`,
+        debit: masuk,
+        kredit: 0,
+      });
+    }
   }
   for (const s of allVoids) {
-    const tunai = s.payments.filter((p) => p.method === "tunai").reduce((n, p) => n + p.amount, 0);
-    if (tunai) raw.push({ at: s.voidedAt ?? s.createdAt, ket: `Void: ${s.localNo}`, debit: 0, kredit: tunai });
+    const keluar = saleCashIn(s);
+    if (keluar) {
+      raw.push({
+        at: s.voidedAt ?? s.createdAt,
+        ket: `Void: ${s.localNo} · ${saleMethodLabel(s)}`,
+        debit: 0,
+        kredit: keluar,
+      });
+    }
   }
   for (const r of returDocs) {
-    const out = tunaiOutForReturn(r.total, getSale(r.saleId));
-    if (out) raw.push({ at: r.createdAt, ket: `Retur: ${r.localNo}`, debit: 0, kredit: out });
+    if (!r.total) continue;
+    raw.push({
+      at: r.createdAt,
+      ket: `Retur: ${r.localNo} · ${PAY_METHOD_LABEL[r.method]}`,
+      debit: 0,
+      kredit: r.total,
+    });
   }
   for (const e of expenses) {
     raw.push({
       at: e.createdAt,
-      ket: `Pengeluaran: ${EXPENSE_LABEL[e.category]}${e.note ? ` — ${e.note}` : ""}`,
+      ket: `Pengeluaran: ${EXPENSE_LABEL[e.category]} · ${EXPENSE_FUND_LABEL[e.fund]}${e.note ? ` — ${e.note}` : ""}`,
       debit: 0,
       kredit: e.amount,
     });
   }
   for (const f of memberFees) {
-    if (f.method !== "tunai") continue;
-    raw.push({ at: f.createdAt, ket: "Pendaftaran member", debit: f.amount, kredit: 0 });
+    raw.push({
+      at: f.createdAt,
+      ket: `Pendaftaran member · ${PAY_METHOD_LABEL[f.method]}`,
+      debit: f.amount,
+      kredit: 0,
+    });
   }
   raw.sort((a, b) => a.at.localeCompare(b.at));
   let saldo = kasAwal;
@@ -1945,6 +2245,29 @@ export function getCursor(): string {
   return one<{ value: string }>(`SELECT value FROM sync_meta WHERE key = 'cursor'`)?.value ?? "1970-01-01T00:00:00.000Z";
 }
 
+const PULL_SCHEMA = "full-v4";
+const EPOCH = "1970-01-01T00:00:00.000Z";
+
+export function pullSince(): string {
+  return EPOCH;
+}
+
+function markPullSchema(): void {
+  run(
+    `INSERT INTO sync_meta (key, value) VALUES ('pull_schema', ?) ON CONFLICT(key) DO UPDATE SET value = excluded.value`,
+    [PULL_SCHEMA],
+  );
+}
+
+export function ensureSyncMeta(): void {
+  if (!one<{ value: string }>(`SELECT value FROM sync_meta WHERE key = 'device_id'`)) {
+    run(`INSERT INTO sync_meta (key, value) VALUES ('device_id', ?)`, [crypto.randomUUID()]);
+  }
+  if (!one<{ value: string }>(`SELECT value FROM sync_meta WHERE key = 'cursor'`)) {
+    run(`INSERT INTO sync_meta (key, value) VALUES ('cursor', ?)`, [EPOCH]);
+  }
+}
+
 export type StockMovementRow = {
   productId: string;
   barcode: string;
@@ -2027,26 +2350,195 @@ function pick(obj: Record<string, unknown>, camel: string, snake: string) {
   return obj[camel] ?? obj[snake];
 }
 
-export function applyPullPayload(data: Record<string, unknown>): void {
-  const did = deviceId();
-  const productsIn = Array.isArray(data.products) ? data.products : [];
-  const usersIn = Array.isArray(data.users) ? data.users : [];
-  const employeesIn = Array.isArray(data.employees) ? data.employees : [];
-  const eventsIn = Array.isArray(data.stockEvents) ? data.stockEvents : [];
-  const customersIn = Array.isArray(data.customers) ? data.customers : [];
-  const feesIn = Array.isArray(data.customerPayments) ? data.customerPayments : [];
-  const rewardsIn = Array.isArray(data.memberRewards) ? data.memberRewards : [];
+function asList(data: Record<string, unknown>, key: string): Record<string, unknown>[] {
+  return Array.isArray(data[key]) ? (data[key] as Record<string, unknown>[]) : [];
+}
+
+function flag01(v: unknown): number {
+  return v === false || v === 0 ? 0 : 1;
+}
+
+function relocateBarcode(barcode: string, keepId: string): void {
+  const clash = one<{ id: string; barcode: string }>(
+    `SELECT id, barcode FROM products WHERE barcode = ? AND id != ?`,
+    [barcode, keepId],
+  );
+  if (!clash) return;
+  const suffix = `~${clash.id.slice(0, 8)}`;
+  const next = clash.barcode.endsWith(suffix) ? `${clash.barcode}-2` : `${clash.barcode}${suffix}`;
+  run(`UPDATE products SET barcode = ? WHERE id = ?`, [next, clash.id]);
+}
+
+function catchUpLocal(data: Record<string, unknown>): void {
+  const flag = `catchup:${PULL_SCHEMA}`;
+  if (one<{ value: string }>(`SELECT value FROM sync_meta WHERE key = ?`, [flag])) return;
+  const remoteSales = new Set(asList(data, "sales").map((s) => String(s.id ?? "")));
+  const remoteRestocks = new Set(asList(data, "stockIns").map((s) => String(s.id ?? "")));
+  const remoteExpenses = new Set(asList(data, "expenses").map((s) => String(s.id ?? "")));
+  const remoteReturns = new Set(asList(data, "returns").map((s) => String(s.id ?? "")));
+  const remoteOpnames = new Set(asList(data, "opnames").map((s) => String(s.id ?? "")));
+  const remoteAtt = new Set(asList(data, "attendances").map((s) => String(s.id ?? "")));
+  const remoteShifts = new Set(asList(data, "cashShifts").map((s) => String(s.id ?? "")));
+  const remoteEvents = new Set(asList(data, "stockEvents").map((s) => String(s.id ?? "")));
+  const sentEvents = new Set<string>();
+
+  for (const sale of listSales("all")) {
+    if (remoteSales.has(sale.id)) continue;
+    const events = eventsOfRef(sale.id);
+    for (const e of events) sentEvents.add(e.id);
+    enqueue("sale", {
+      sale: {
+        id: sale.id,
+        localNo: sale.localNo,
+        cashierId: sale.cashierId,
+        cashierName: sale.cashierName,
+        customerId: sale.customerId,
+        method: sale.method,
+        subtotal: sale.subtotal,
+        discount: sale.discount,
+        deliveryCost: sale.deliveryCost,
+        ppn: sale.ppn,
+        ppnRate: sale.ppnRate,
+        note: sale.note,
+        total: sale.total,
+        paid: sale.paid,
+        changeAmount: sale.changeAmount,
+        status: sale.status,
+        createdAt: sale.createdAt,
+        voidedAt: sale.voidedAt,
+      },
+      items: sale.items,
+      payments: sale.payments.filter((p) => p.id),
+      events,
+    });
+    if (sale.status === "void") {
+      enqueue("sale_void", {
+        id: sale.id,
+        voidedAt: sale.voidedAt ?? sale.createdAt,
+        events: events.filter((e) => e.type === "sale_void"),
+      });
+    }
+  }
+  for (const doc of listRestocks("all")) {
+    if (remoteRestocks.has(doc.id)) continue;
+    const events = eventsOfRef(doc.id);
+    for (const e of events) sentEvents.add(e.id);
+    enqueue("stock_in", { doc, items: doc.items, events });
+  }
+  for (const doc of listReturns()) {
+    if (remoteReturns.has(doc.id)) continue;
+    const events = eventsOfRef(doc.id);
+    for (const e of events) sentEvents.add(e.id);
+    enqueue("sale_return", {
+      doc: {
+        id: doc.id,
+        localNo: doc.localNo,
+        saleId: doc.saleId,
+        cashierId: doc.cashierId,
+        cashierName: doc.cashierName,
+        method: doc.method,
+        total: doc.total,
+        note: doc.note,
+        createdAt: doc.createdAt,
+      },
+      items: doc.items,
+      events,
+    });
+  }
+  for (const doc of listOpnames()) {
+    if (remoteOpnames.has(doc.id)) continue;
+    const events = eventsOfRef(doc.id);
+    for (const e of events) sentEvents.add(e.id);
+    enqueue("opname", {
+      doc: {
+        id: doc.id,
+        localNo: doc.localNo,
+        cashierId: doc.cashierId,
+        cashierName: doc.cashierName,
+        note: doc.note,
+        createdAt: doc.createdAt,
+      },
+      items: doc.items,
+      events,
+    });
+  }
+  for (const row of listExpenses()) {
+    if (remoteExpenses.has(row.id)) continue;
+    enqueue("expense", row);
+  }
+  for (const row of all<{ id: string; employee_id: string; type: string; created_at: string }>(
+    `SELECT id, employee_id, type, created_at FROM attendances`,
+  )) {
+    if (remoteAtt.has(row.id)) continue;
+    enqueue("attendance", {
+      id: row.id,
+      employeeId: row.employee_id,
+      type: row.type,
+      createdAt: row.created_at,
+    });
+  }
+  for (const row of listCashShifts()) {
+    if (remoteShifts.has(row.id)) continue;
+    enqueue("cash_shift", row);
+  }
+  for (const e of all<{
+    id: string;
+    productId: string;
+    type: string;
+    qty: number;
+    refId: string | null;
+    deviceId: string;
+    createdAt: string;
+  }>(
+    `SELECT id, product_id AS productId, type, qty, ref_id AS refId, device_id AS deviceId, created_at AS createdAt FROM stock_events`,
+  )) {
+    if (remoteEvents.has(e.id) || sentEvents.has(e.id)) continue;
+    if (e.type === "sale" || e.type === "sale_void" || e.type === "return" || e.type === "opname") continue;
+    const product = getProduct(e.productId);
+    if (!product) continue;
+    enqueue("stock_in", {
+      doc: {
+        id: e.id,
+        localNo: `AWL-${e.id.slice(0, 8)}`,
+        cashierId: "local",
+        cashierName: "Stok awal",
+        createdAt: e.createdAt,
+      },
+      items: [
+        {
+          id: newId(),
+          stockInId: e.id,
+          productId: product.id,
+          barcode: product.barcode,
+          name: product.name,
+          qty: e.qty,
+          buyPrice: product.buyPrice,
+        },
+      ],
+      events: [e],
+    });
+  }
+  run(`INSERT INTO sync_meta (key, value) VALUES (?, ?) ON CONFLICT(key) DO UPDATE SET value = excluded.value`, [
+    flag,
+    new Date().toISOString(),
+  ]);
+}
+
+function isSampleProduct(name: string, barcode: string): boolean {
+  if (name === "Beras Ramos 5kg") return true;
+  return SAMPLE_PRODUCTS.some(
+    (p) => p.name === name && (barcode === p.barcode || barcode.startsWith(`${p.barcode}~`)),
+  );
+}
+
+export function applyPullPayload(data: Record<string, unknown>, full = false): void {
   tx(() => {
-    for (const raw of productsIn) {
-      const p = raw as Record<string, unknown>;
+    for (const p of asList(data, "products")) {
       const id = String(p.id ?? "");
       if (!id) continue;
-      const updatedAt = isoOf(pick(p, "updatedAt", "updated_at"));
-      const local = one<{ updated_at: string }>(`SELECT updated_at FROM products WHERE id = ?`, [id]);
-      if (local && local.updated_at >= updatedAt) continue;
       const barcode = String(pick(p, "barcode", "barcode") ?? "");
-      const clash = one<{ id: string }>(`SELECT id FROM products WHERE barcode = ? AND id != ?`, [barcode, id]);
-      if (clash) continue;
+      if (isSampleProduct(String(p.name ?? ""), barcode)) continue;
+      relocateBarcode(barcode, id);
       run(
         `INSERT INTO products (id, barcode, name, unit, category, buy_price, sell_price, active, updated_at)
          VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
@@ -2061,79 +2553,68 @@ export function applyPullPayload(data: Record<string, unknown>): void {
           String(p.category ?? ""),
           Number(pick(p, "buyPrice", "buy_price") ?? 0),
           Number(pick(p, "sellPrice", "sell_price") ?? 0),
-          pick(p, "active", "active") === false || pick(p, "active", "active") === 0 ? 0 : 1,
-          updatedAt,
+          flag01(pick(p, "active", "active")),
+          isoOf(pick(p, "updatedAt", "updated_at")),
         ],
       );
     }
-    for (const raw of usersIn) {
-      const u = raw as Record<string, unknown>;
+    for (const u of asList(data, "users")) {
       const id = String(u.id ?? "");
-      if (!id) continue;
-      const updatedAt = isoOf(pick(u, "updatedAt", "updated_at"));
-      const local = one<{ updated_at: string }>(`SELECT updated_at FROM users WHERE id = ?`, [id]);
-      if (local && local.updated_at >= updatedAt) continue;
       const pinHash = String(pick(u, "pinHash", "pin_hash") ?? "");
-      const menus = u.menus != null ? (typeof u.menus === "string" ? u.menus : JSON.stringify(u.menus)) : "";
-      const existing = one<{ id: string }>(`SELECT id FROM users WHERE id = ?`, [id]);
+      if (!id || !pinHash) continue;
+      const role = String(u.role ?? "kasir") === "owner" ? "owner" : "kasir";
+      const existing = one<{ menus: string }>(`SELECT menus FROM users WHERE id = ?`, [id]);
+      const remoteMenus = u.menus != null ? (typeof u.menus === "string" ? u.menus : JSON.stringify(u.menus)) : "";
+      const menus = remoteMenus && remoteMenus !== "[]" ? remoteMenus : existing?.menus || JSON.stringify(defaultMenus(role));
+      const updatedAt = isoOf(pick(u, "updatedAt", "updated_at"));
       if (existing) {
         run(`UPDATE users SET name=?, role=?, pin_hash=?, menus=?, active=?, updated_at=? WHERE id=?`, [
           String(u.name ?? ""),
-          String(u.role ?? "kasir"),
-          pinHash || one<{ pin_hash: string }>(`SELECT pin_hash FROM users WHERE id = ?`, [id])?.pin_hash,
+          role,
+          pinHash,
           menus,
-          pick(u, "active", "active") === false || pick(u, "active", "active") === 0 ? 0 : 1,
+          flag01(pick(u, "active", "active")),
           updatedAt,
           id,
         ]);
-      } else if (pinHash) {
+      } else {
         run(
           `INSERT INTO users (id, name, role, pin_hash, pin, menus, active, updated_at) VALUES (?, ?, ?, ?, '', ?, ?, ?)`,
-          [
-            id,
-            String(u.name ?? ""),
-            String(u.role ?? "kasir"),
-            pinHash,
-            menus,
-            pick(u, "active", "active") === false || pick(u, "active", "active") === 0 ? 0 : 1,
-            updatedAt,
-          ],
+          [id, String(u.name ?? ""), role, pinHash, menus, flag01(pick(u, "active", "active")), updatedAt],
         );
       }
     }
-    for (const raw of employeesIn) {
-      const e = raw as Record<string, unknown>;
+    for (const e of asList(data, "employees")) {
       const id = String(e.id ?? "");
       if (!id) continue;
-      const updatedAt = isoOf(pick(e, "updatedAt", "updated_at"));
-      const local = one<{ updated_at: string }>(`SELECT updated_at FROM employees WHERE id = ?`, [id]);
-      if (local && local.updated_at >= updatedAt) continue;
       const pinHash = String(pick(e, "pinHash", "pin_hash") ?? "");
-      const existing = one<{ id: string }>(`SELECT id FROM employees WHERE id = ?`, [id]);
+      const existing = one<{ pin_hash: string }>(`SELECT pin_hash FROM employees WHERE id = ?`, [id]);
+      const hash = pinHash || existing?.pin_hash || "";
+      if (!hash) continue;
+      const updatedAt = isoOf(pick(e, "updatedAt", "updated_at"));
       if (existing) {
-        run(`UPDATE employees SET name=?, job_role=?, active=?, updated_at=? WHERE id=?`, [
+        run(`UPDATE employees SET name=?, job_role=?, pin_hash=?, active=?, updated_at=? WHERE id=?`, [
           String(e.name ?? ""),
           String(pick(e, "jobRole", "job_role") ?? ""),
-          pick(e, "active", "active") === false || pick(e, "active", "active") === 0 ? 0 : 1,
+          hash,
+          flag01(pick(e, "active", "active")),
           updatedAt,
           id,
         ]);
-      } else if (pinHash) {
+      } else {
         run(`INSERT INTO employees (id, name, job_role, pin_hash, active, updated_at) VALUES (?, ?, ?, ?, ?, ?)`, [
           id,
           String(e.name ?? ""),
           String(pick(e, "jobRole", "job_role") ?? ""),
-          pinHash,
-          pick(e, "active", "active") === false || pick(e, "active", "active") === 0 ? 0 : 1,
+          hash,
+          flag01(pick(e, "active", "active")),
           updatedAt,
         ]);
       }
     }
-    for (const raw of eventsIn) {
-      const e = raw as Record<string, unknown>;
+    for (const e of asList(data, "stockEvents")) {
       const id = String(e.id ?? "");
-      const device = String(pick(e, "deviceId", "device_id") ?? "");
-      if (!id || device === did) continue;
+      if (!id) continue;
       run(
         `INSERT OR IGNORE INTO stock_events (id, product_id, type, qty, ref_id, device_id, created_at)
          VALUES (?, ?, ?, ?, ?, ?, ?)`,
@@ -2143,18 +2624,14 @@ export function applyPullPayload(data: Record<string, unknown>): void {
           String(e.type ?? "adjust"),
           Number(e.qty ?? 0),
           pick(e, "refId", "ref_id") == null ? null : String(pick(e, "refId", "ref_id")),
-          device,
+          String(pick(e, "deviceId", "device_id") ?? ""),
           isoOf(pick(e, "createdAt", "created_at")),
         ],
       );
     }
-    for (const raw of customersIn) {
-      const c = raw as Record<string, unknown>;
+    for (const c of asList(data, "customers")) {
       const id = String(c.id ?? "");
       if (!id) continue;
-      const updatedAt = isoOf(pick(c, "updatedAt", "updated_at"));
-      const local = one<{ updated_at: string }>(`SELECT updated_at FROM customers WHERE id = ?`, [id]);
-      if (local && local.updated_at >= updatedAt) continue;
       run(
         `INSERT INTO customers (id, name, phone, note, active, updated_at)
          VALUES (?, ?, ?, ?, ?, ?)
@@ -2165,13 +2642,12 @@ export function applyPullPayload(data: Record<string, unknown>): void {
           String(c.name ?? ""),
           String(c.phone ?? ""),
           String(c.note ?? ""),
-          pick(c, "active", "active") === false || pick(c, "active", "active") === 0 ? 0 : 1,
-          updatedAt,
+          flag01(pick(c, "active", "active")),
+          isoOf(pick(c, "updatedAt", "updated_at")),
         ],
       );
     }
-    for (const raw of feesIn) {
-      const f = raw as Record<string, unknown>;
+    for (const f of asList(data, "customerPayments")) {
       const id = String(f.id ?? "");
       if (!id) continue;
       run(
@@ -2189,8 +2665,7 @@ export function applyPullPayload(data: Record<string, unknown>): void {
         ],
       );
     }
-    for (const raw of rewardsIn) {
-      const r = raw as Record<string, unknown>;
+    for (const r of asList(data, "memberRewards")) {
       const id = String(r.id ?? "");
       if (!id) continue;
       run(
@@ -2206,6 +2681,232 @@ export function applyPullPayload(data: Record<string, unknown>): void {
         ],
       );
     }
+    for (const s of asList(data, "sales")) {
+      const id = String(s.id ?? "");
+      if (!id) continue;
+      run(
+        `INSERT INTO sales (id, local_no, cashier_id, cashier_name, customer_id, method, subtotal, discount, delivery_cost, ppn, ppn_rate, note, total, paid, change_amount, status, created_at, voided_at)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+         ON CONFLICT(id) DO UPDATE SET status=excluded.status, voided_at=excluded.voided_at, customer_id=excluded.customer_id`,
+        [
+          id,
+          String(pick(s, "localNo", "local_no") ?? ""),
+          String(pick(s, "cashierId", "cashier_id") ?? ""),
+          String(pick(s, "cashierName", "cashier_name") ?? ""),
+          pick(s, "customerId", "customer_id") == null ? null : String(pick(s, "customerId", "customer_id")),
+          String(s.method ?? "tunai"),
+          Number(s.subtotal ?? 0),
+          Number(s.discount ?? 0),
+          Number(pick(s, "deliveryCost", "delivery_cost") ?? 0),
+          Number(s.ppn ?? 0),
+          Number(pick(s, "ppnRate", "ppn_rate") ?? 0),
+          String(s.note ?? ""),
+          Number(s.total ?? 0),
+          Number(s.paid ?? 0),
+          Number(pick(s, "changeAmount", "change_amount") ?? 0),
+          String(s.status ?? "selesai"),
+          isoOf(pick(s, "createdAt", "created_at")),
+          pick(s, "voidedAt", "voided_at") == null ? null : isoOf(pick(s, "voidedAt", "voided_at")),
+        ],
+      );
+    }
+    for (const it of asList(data, "saleItems")) {
+      const id = String(it.id ?? "");
+      if (!id) continue;
+      run(
+        `INSERT OR IGNORE INTO sale_items (id, sale_id, product_id, barcode, name, qty, sell_price, cost_price)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
+        [
+          id,
+          String(pick(it, "saleId", "sale_id") ?? ""),
+          String(pick(it, "productId", "product_id") ?? ""),
+          String(it.barcode ?? ""),
+          String(it.name ?? ""),
+          Number(it.qty ?? 0),
+          Number(pick(it, "sellPrice", "sell_price") ?? 0),
+          Number(pick(it, "costPrice", "cost_price") ?? 0),
+        ],
+      );
+    }
+    for (const p of asList(data, "salePayments")) {
+      const id = String(p.id ?? "");
+      if (!id) continue;
+      run(
+        `INSERT OR IGNORE INTO sale_payments (id, sale_id, method, amount) VALUES (?, ?, ?, ?)`,
+        [id, String(pick(p, "saleId", "sale_id") ?? ""), String(p.method ?? "tunai"), Number(p.amount ?? 0)],
+      );
+    }
+    for (const e of asList(data, "expenses")) {
+      const id = String(e.id ?? "");
+      if (!id) continue;
+      run(
+        `INSERT INTO expenses (id, category, amount, note, fund, created_at, cashier_name)
+         VALUES (?, ?, ?, ?, ?, ?, ?)
+         ON CONFLICT(id) DO UPDATE SET category=excluded.category, amount=excluded.amount, note=excluded.note,
+           fund=excluded.fund, cashier_name=excluded.cashier_name`,
+        [
+          id,
+          String(e.category ?? ""),
+          Number(e.amount ?? 0),
+          String(e.note ?? ""),
+          String(e.fund ?? "laci"),
+          isoOf(pick(e, "createdAt", "created_at")),
+          String(pick(e, "cashierName", "cashier_name") ?? ""),
+        ],
+      );
+    }
+    for (const d of asList(data, "stockIns")) {
+      const id = String(d.id ?? "");
+      if (!id) continue;
+      run(
+        `INSERT OR IGNORE INTO stock_ins (id, local_no, cashier_id, cashier_name, created_at) VALUES (?, ?, ?, ?, ?)`,
+        [
+          id,
+          String(pick(d, "localNo", "local_no") ?? ""),
+          String(pick(d, "cashierId", "cashier_id") ?? ""),
+          String(pick(d, "cashierName", "cashier_name") ?? ""),
+          isoOf(pick(d, "createdAt", "created_at")),
+        ],
+      );
+    }
+    for (const it of asList(data, "stockInItems")) {
+      const id = String(it.id ?? "");
+      if (!id) continue;
+      run(
+        `INSERT OR IGNORE INTO stock_in_items (id, stock_in_id, product_id, barcode, name, qty, buy_price)
+         VALUES (?, ?, ?, ?, ?, ?, ?)`,
+        [
+          id,
+          String(pick(it, "stockInId", "stock_in_id") ?? ""),
+          String(pick(it, "productId", "product_id") ?? ""),
+          String(it.barcode ?? ""),
+          String(it.name ?? ""),
+          Number(it.qty ?? 0),
+          Number(pick(it, "buyPrice", "buy_price") ?? 0),
+        ],
+      );
+    }
+    for (const d of asList(data, "returns")) {
+      const id = String(d.id ?? "");
+      if (!id) continue;
+      run(
+        `INSERT OR IGNORE INTO returns (id, local_no, sale_id, cashier_id, cashier_name, method, total, note, created_at)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+        [
+          id,
+          String(pick(d, "localNo", "local_no") ?? ""),
+          String(pick(d, "saleId", "sale_id") ?? ""),
+          String(pick(d, "cashierId", "cashier_id") ?? ""),
+          String(pick(d, "cashierName", "cashier_name") ?? ""),
+          String(d.method ?? "tunai"),
+          Number(d.total ?? 0),
+          String(d.note ?? ""),
+          isoOf(pick(d, "createdAt", "created_at")),
+        ],
+      );
+    }
+    for (const it of asList(data, "returnItems")) {
+      const id = String(it.id ?? "");
+      if (!id) continue;
+      run(
+        `INSERT OR IGNORE INTO return_items (id, return_id, sale_item_id, product_id, barcode, name, qty, sell_price, cost_price)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+        [
+          id,
+          String(pick(it, "returnId", "return_id") ?? ""),
+          String(pick(it, "saleItemId", "sale_item_id") ?? ""),
+          String(pick(it, "productId", "product_id") ?? ""),
+          String(it.barcode ?? ""),
+          String(it.name ?? ""),
+          Number(it.qty ?? 0),
+          Number(pick(it, "sellPrice", "sell_price") ?? 0),
+          Number(pick(it, "costPrice", "cost_price") ?? 0),
+        ],
+      );
+    }
+    for (const d of asList(data, "opnames")) {
+      const id = String(d.id ?? "");
+      if (!id) continue;
+      run(
+        `INSERT OR IGNORE INTO opnames (id, local_no, cashier_id, cashier_name, note, created_at) VALUES (?, ?, ?, ?, ?, ?)`,
+        [
+          id,
+          String(pick(d, "localNo", "local_no") ?? ""),
+          String(pick(d, "cashierId", "cashier_id") ?? ""),
+          String(pick(d, "cashierName", "cashier_name") ?? ""),
+          String(d.note ?? ""),
+          isoOf(pick(d, "createdAt", "created_at")),
+        ],
+      );
+    }
+    for (const it of asList(data, "opnameItems")) {
+      const id = String(it.id ?? "");
+      if (!id) continue;
+      run(
+        `INSERT OR IGNORE INTO opname_items (id, opname_id, product_id, barcode, name, unit, sistem, fisik, selisih)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+        [
+          id,
+          String(pick(it, "opnameId", "opname_id") ?? ""),
+          String(pick(it, "productId", "product_id") ?? ""),
+          String(it.barcode ?? ""),
+          String(it.name ?? ""),
+          String(it.unit ?? "pcs"),
+          Number(it.sistem ?? 0),
+          Number(it.fisik ?? 0),
+          Number(it.selisih ?? 0),
+        ],
+      );
+    }
+    for (const a of asList(data, "attendances")) {
+      const id = String(a.id ?? "");
+      if (!id) continue;
+      run(
+        `INSERT OR IGNORE INTO attendances (id, employee_id, type, created_at) VALUES (?, ?, ?, ?)`,
+        [
+          id,
+          String(pick(a, "employeeId", "employee_id") ?? ""),
+          String(a.type ?? "in"),
+          isoOf(pick(a, "createdAt", "created_at")),
+        ],
+      );
+    }
+    for (const s of asList(data, "cashShifts")) {
+      const id = String(s.id ?? "");
+      if (!id) continue;
+      const status = String(s.status ?? "closed");
+      const local = one<{ id: string }>(`SELECT id FROM cash_shifts WHERE id = ?`, [id]);
+      if (status === "open" && !local) continue;
+      run(
+        `INSERT INTO cash_shifts (id, cashier_id, cashier_name, opened_at, closed_at, kas_awal, kas_hitung, kas_sistem, selisih, note, status)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+         ON CONFLICT(id) DO UPDATE SET closed_at=excluded.closed_at, kas_hitung=excluded.kas_hitung,
+           kas_sistem=excluded.kas_sistem, selisih=excluded.selisih, note=excluded.note, status=excluded.status`,
+        [
+          id,
+          String(pick(s, "cashierId", "cashier_id") ?? ""),
+          String(pick(s, "cashierName", "cashier_name") ?? ""),
+          isoOf(pick(s, "openedAt", "opened_at")),
+          pick(s, "closedAt", "closed_at") == null ? null : isoOf(pick(s, "closedAt", "closed_at")),
+          Number(pick(s, "kasAwal", "kas_awal") ?? 0),
+          pick(s, "kasHitung", "kas_hitung") == null ? null : Number(pick(s, "kasHitung", "kas_hitung")),
+          pick(s, "kasSistem", "kas_sistem") == null ? null : Number(pick(s, "kasSistem", "kas_sistem")),
+          pick(s, "selisih", "selisih") == null ? null : Number(pick(s, "selisih", "selisih")),
+          String(s.note ?? ""),
+          status,
+        ],
+      );
+    }
+    for (const s of asList(data, "settings")) {
+      const key = String(s.key ?? "store");
+      const raw = s.value;
+      const value = typeof raw === "string" ? raw : JSON.stringify(raw ?? {});
+      if (!key || !value) continue;
+      run(`INSERT INTO settings (key, value) VALUES (?, ?) ON CONFLICT(key) DO UPDATE SET value=excluded.value`, [
+        key,
+        value,
+      ]);
+    }
     const cursor = data.cursor;
     if (typeof cursor === "string" && cursor) {
       run(
@@ -2213,6 +2914,8 @@ export function applyPullPayload(data: Record<string, unknown>): void {
         [cursor],
       );
     }
+    if (full) catchUpLocal(data);
+    markPullSchema();
   });
 }
 

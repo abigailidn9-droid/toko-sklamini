@@ -3,15 +3,15 @@ import { CLOUD_API_TOKEN, CLOUD_API_URL } from "./cloud.ts";
 import {
   applyPullPayload,
   deviceId,
-  getCursor,
   outboxItems,
   pendingCount,
+  pullSince,
   removeOutbox,
 } from "./repo.ts";
 
 const PING_MS = 4000;
 const PUSH_MS = 15000;
-const PULL_MS = 12000;
+const PULL_MS = 45000;
 const BATCH = 40;
 
 function syncHeaders(): Record<string, string> {
@@ -66,13 +66,14 @@ async function pushOutbox(): Promise<boolean> {
 }
 
 async function pullRemote(): Promise<void> {
-  const res = await fetch(`${CLOUD_API_URL}/v1/sync/pull?since=${encodeURIComponent(getCursor())}`, {
+  const full = pullSince() === "1970-01-01T00:00:00.000Z";
+  const res = await fetch(`${CLOUD_API_URL}/v1/sync/pull?since=${encodeURIComponent(pullSince())}`, {
     headers: syncHeaders(),
     signal: AbortSignal.timeout(PULL_MS),
   });
   if (!res.ok) return;
   const data = (await res.json()) as Record<string, unknown>;
-  applyPullPayload(data);
+  applyPullPayload(data, full);
 }
 
 async function runOnce(): Promise<ServerStatus> {
@@ -83,14 +84,14 @@ async function runOnce(): Promise<ServerStatus> {
 
     let pushed = true;
     while (outboxItems().length && pushed) {
+      const before = outboxItems().length;
       pushed = await pushOutbox();
+      if (outboxItems().length >= before) break;
     }
-    if (pushed) {
-      try {
-        await pullRemote();
-      } catch {
-        /* pull gagal: penjualan lokal tetap aman */
-      }
+    try {
+      await pullRemote();
+    } catch {
+      /* pull gagal: penjualan lokal tetap aman */
     }
     await persistNow();
     return { online: true, pending: pendingCount() };

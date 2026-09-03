@@ -70,7 +70,7 @@ export function KasPage({
       toast.show(
         beda === 0 ? "Kas cocok" : beda > 0 ? "Kas lebih" : "Kas kurang",
         beda === 0 ? "ok" : "info",
-        `Hitung ${rp(row.kasHitung ?? 0)} · Sistem ${rp(row.kasSistem ?? 0)} · Struk & detail dicetak`,
+        `Hitung ${rp(row.kasHitung ?? 0)} · Sistem ${rp(row.kasSistem ?? 0)} · Struk dicetak`,
       );
       onChange();
     } catch (e) {
@@ -243,7 +243,7 @@ export function KasPage({
                 Batal
               </Button>
             </div>
-            <Text tone="secondary">Hitung uang fisik di laci. Setelah tutup, struk 58mm dan detail A4 dicetak.</Text>
+            <Text tone="secondary">Hitung uang fisik di laci. Setelah tutup, struk settlement dicetak.</Text>
             <div className="settle-close-sum">
               <div>
                 <span>Kas awal</span>

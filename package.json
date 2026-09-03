@@ -1,7 +1,7 @@
 {
   "name": "toko-sklamini",
   "private": true,
-  "version": "1.1.0",
+  "version": "1.4.0",
   "description": "Kasir Windows TOKO SKLAMINI — online + offline",
   "workspaces": [
     "packages/*",
@@ -10,8 +10,9 @@
   "scripts": {
     "dev": "npm run dev -w @sklamini/kasir",
     "dev:kasir": "npm run dev -w @sklamini/kasir",
+    "dev:owner": "npm run dev -w @sklamini/owner",
     "dev:api": "npm run dev -w @sklamini/api",
-    "build": "npm run build -w @sklamini/shared && npm run build -w @sklamini/kasir",
+    "build": "npm run build -w @sklamini/shared && npm run build -w @sklamini/kasir && npm run build -w @sklamini/owner",
     "tauri": "npm run tauri -w @sklamini/kasir",
     "tauri:dev": "npm run tauri:dev -w @sklamini/kasir"
   }

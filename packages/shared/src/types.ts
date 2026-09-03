@@ -26,11 +26,38 @@ export const EXPENSE_CATEGORIES = [
 ] as const;
 export type ExpenseCategory = (typeof EXPENSE_CATEGORIES)[number];
 
+export const EXPENSE_FUNDS = ["laci", "toko"] as const;
+export type ExpenseFund = (typeof EXPENSE_FUNDS)[number];
+
 export const PRODUCT_CATEGORIES = [
-  "Sembako",
-  "Minuman",
-  "Makanan",
-  "Rumah tangga",
+  "Hot Wheels",
+  "Diecast",
+  "Action Figure",
+  "Building",
+  "Kartu",
+  "Boneka",
+  "Kreatif",
+  "Puzzle",
+] as const;
+
+/** Katalog dummy lama. Tidak diisi lagi; dipakai untuk menghapus sisa di kasir. */
+export const SAMPLE_PRODUCTS = [
+  { barcode: "899999900001", name: "Hot Wheels Basic Assortment" },
+  { barcode: "8998866200112", name: "Hot Wheels Premium Car Culture" },
+  { barcode: "899999900088", name: "Hot Wheels 5-Pack" },
+  { barcode: "899999900102", name: "Hot Wheels Track Set Loop" },
+  { barcode: "899999900115", name: "Hot Wheels Mystery Models" },
+  { barcode: "8998866100470", name: "Tomica Regular" },
+  { barcode: "8991008123456", name: "Matchbox Basic" },
+  { barcode: "899999902001", name: "Mini GT 1:64" },
+  { barcode: "899999902014", name: "Kartu Pokemon Booster" },
+  { barcode: "8991002101234", name: "Pokemon Battle Figure" },
+  { barcode: "899999903001", name: "Marvel Titan Hero" },
+  { barcode: "899999903018", name: "LEGO Classic Creative" },
+  { barcode: "899999903025", name: "LEGO Duplo My First" },
+  { barcode: "899999904001", name: "Boneka Karakter 25cm" },
+  { barcode: "899999904018", name: "Play-Doh 4 Pack" },
+  { barcode: "899999904025", name: "Puzzle 100 pcs" },
 ] as const;
 
 export type Product = {
@@ -120,6 +147,7 @@ export type Expense = {
   category: ExpenseCategory;
   amount: number;
   note: string;
+  fund: ExpenseFund;
   createdAt: string;
   cashierName: string;
 };
@@ -150,7 +178,8 @@ export type Employee = {
   active: boolean;
 };
 
-export const MEMBER_FEE = 20_000;
+export const MEMBER_FEE = 0;
+export const MEMBER_MIN_SPEND = 50_000;
 export const MEMBER_VISIT_GOAL = 30;
 export const MEMBER_REWARD_NAME = "Hot Wheels Premium";
 
@@ -158,6 +187,7 @@ export type Member = {
   id: string;
   name: string;
   phone: string;
+  note: string;
   active: boolean;
   updatedAt: string;
 };
@@ -272,6 +302,8 @@ export type StoreSettings = {
   bankName: string;
   bankAccount: string;
   bankHolder: string;
+  bookOpening: number;
+  bookOpeningDate: string;
 };
 
 export type LabaRugi = {
@@ -324,6 +356,8 @@ export const DEFAULT_SETTINGS: StoreSettings = {
   bankName: "BCA",
   bankAccount: "1234567890",
   bankHolder: "TOKO SKLAMINI",
+  bookOpening: 0,
+  bookOpeningDate: "",
 };
 
 export function calcPpn(subtotal: number, discount: number, enabled: boolean, rate: number) {
@@ -387,3 +421,12 @@ export const EXPENSE_LABEL: Record<ExpenseCategory, string> = {
   atk: "ATK",
   lain: "Lain-lain",
 };
+
+export const EXPENSE_FUND_LABEL: Record<ExpenseFund, string> = {
+  laci: "Laci kasir",
+  toko: "Kas toko",
+};
+
+export function asExpenseFund(raw: unknown): ExpenseFund {
+  return raw === "toko" ? "toko" : "laci";
+}

@@ -5,6 +5,7 @@ import {
   formatQty,
   formatRupiahInput,
   looksLikeCompleteBarcode,
+  MEMBER_MIN_SPEND,
   MEMBER_REWARD_NAME,
   MEMBER_VISIT_GOAL,
   parseRupiah,
@@ -52,8 +53,9 @@ function parsePct(raw: string) {
 }
 
 type ExtraKind = "ongkir" | "diskon" | "catatan";
+type CartExtraName = ExtraKind | "member";
 
-function CartExtraIcon({ name }: { name: ExtraKind }) {
+function CartExtraIcon({ name }: { name: CartExtraName }) {
   const common = {
     width: 18,
     height: 18,
@@ -65,6 +67,14 @@ function CartExtraIcon({ name }: { name: ExtraKind }) {
     strokeLinejoin: "round" as const,
     "aria-hidden": true,
   };
+  if (name === "member") {
+    return (
+      <svg {...common}>
+        <circle cx="12" cy="8" r="3" />
+        <path d="M5.8 19c1.2-3.1 3.6-4.6 6.2-4.6S17 15.9 18.2 19" />
+      </svg>
+    );
+  }
   if (name === "ongkir") {
     return (
       <svg {...common}>
@@ -97,7 +107,7 @@ function CartExtraBtn({
   active,
   onOpen,
 }: {
-  name: ExtraKind;
+  name: CartExtraName;
   label: string;
   active: boolean;
   onOpen: () => void;
@@ -122,6 +132,7 @@ type LiveCart = {
   discMode: "rp" | "pct";
   deliveryStr: string;
   note: string;
+  memberId: string | null;
 };
 
 function liveCartKey(cashierId: string) {
@@ -134,7 +145,10 @@ function loadLiveCart(cashierId: string): LiveCart | null {
     if (!raw) return null;
     const data = JSON.parse(raw) as LiveCart;
     if (!Array.isArray(data.items)) return null;
-    return data;
+    return {
+      ...data,
+      memberId: data.memberId ?? null,
+    };
   } catch {
     return null;
   }
@@ -188,7 +202,10 @@ export function KasirPage({
   const [payOpen, setPayOpen] = useState(false);
   const [payMethod, setPayMethod] = useState<PayMethod>("tunai");
   const [cashIn, setCashIn] = useState("100.000");
-  const [memberId, setMemberId] = useState<string | null>(null);
+  const [memberId, setMemberId] = useState<string | null>(() => saved?.memberId ?? null);
+  const [joinName, setJoinName] = useState("");
+  const [joinPhone, setJoinPhone] = useState("");
+  const [memberOpen, setMemberOpen] = useState(false);
   const toast = useToast();
   const [err, setErr] = useState("");
   const [clearOpen, setClearOpen] = useState(false);
@@ -196,7 +213,11 @@ export function KasirPage({
   const scanPrevRef = useRef("");
   const scanAtRef = useRef(0);
   const lastSale = useMemo(() => latestCompletedSale(), [tick]);
-  const overlayOpen = Boolean(payOpen || extraEdit || clearOpen || priceEditId || !shift);
+  const cartMember = useMemo(
+    () => (memberId ? listMembers().find((m) => m.id === memberId) ?? null : null),
+    [memberId, tick],
+  );
+  const overlayOpen = Boolean(payOpen || extraEdit || clearOpen || priceEditId || memberOpen || !shift);
   const { ref: scanRef, focus: focusScan } = useScanFocus(!overlayOpen, {
     restoreOnWindowFocus: true,
     returnAfterClick: true,
@@ -214,12 +235,12 @@ export function KasirPage({
   }, [restore, onRestoreUsed]);
 
   useEffect(() => {
-    if (!cart.length && !discountStr && !deliveryStr && !note) {
+    if (!cart.length && !discountStr && !deliveryStr && !note && !memberId) {
       clearLiveCart(session.id);
       return;
     }
-    saveLiveCart(session.id, { items: cart, discountStr, discMode, deliveryStr, note });
-  }, [cart, discountStr, discMode, deliveryStr, note, session.id]);
+    saveLiveCart(session.id, { items: cart, discountStr, discMode, deliveryStr, note, memberId });
+  }, [cart, discountStr, discMode, deliveryStr, note, memberId, session.id]);
 
   const categories = ["Semua", ...Array.from(new Set(products.map((p) => p.category)))];
   const q = scan.trim().toLowerCase();
@@ -252,6 +273,9 @@ export function KasirPage({
     setExtraEdit(null);
     setPriceEditId(null);
     setMemberId(null);
+    setJoinName("");
+    setJoinPhone("");
+    setMemberOpen(false);
   }
 
   function missBarcode(code: string) {
@@ -403,7 +427,8 @@ export function KasirPage({
         if (!payOpen) hold();
       }
       if (e.key === "Escape") {
-        if (extraEdit) setExtraEdit(null);
+        if (memberOpen) setMemberOpen(false);
+        else if (extraEdit) setExtraEdit(null);
         else setPayOpen(false);
       }
     }
@@ -424,10 +449,15 @@ export function KasirPage({
         ppnRate: settings.ppnEnabled ? settings.ppnRate : 0,
         note,
         customerId: memberId,
+        newMember:
+          !memberId && joinName.trim() && total >= MEMBER_MIN_SPEND
+            ? { name: joinName, phone: joinPhone }
+            : null,
         payments: [{ method: payMethod, amount: total }],
       });
-      const visits = memberId ? memberVisitCount(memberId) : 0;
-      const pending = memberId ? memberPendingRewards(memberId) : 0;
+      const usedMember = sale.customerId;
+      const visits = usedMember ? memberVisitCount(usedMember) : 0;
+      const pending = usedMember ? memberPendingRewards(usedMember) : 0;
       resetCart();
       setPayOpen(false);
       setErr("");
@@ -632,7 +662,13 @@ export function KasirPage({
             )}
           </div>
           <div className="cart-footer">
-            <div className="cart-extras" role="toolbar" aria-label="Ongkir, diskon, catatan">
+            <div className="cart-extras" role="toolbar" aria-label="Member, ongkir, diskon, catatan">
+              <CartExtraBtn
+                name="member"
+                label="Member"
+                active={Boolean(memberId) || Boolean(joinName.trim())}
+                onOpen={() => setMemberOpen(true)}
+              />
               <CartExtraBtn
                 name="ongkir"
                 label="Ongkir"
@@ -652,8 +688,19 @@ export function KasirPage({
                 onOpen={() => setExtraEdit("catatan")}
               />
             </div>
-            {discount || deliveryCost || settings.ppnEnabled ? (
+            {discount || deliveryCost || settings.ppnEnabled || cartMember || joinName.trim() ? (
               <div className="cart-break">
+                {cartMember ? (
+                  <div>
+                    <span>Member</span>
+                    <b>{cartMember.name}</b>
+                  </div>
+                ) : joinName.trim() ? (
+                  <div>
+                    <span>Member baru</span>
+                    <b>{joinName.trim()}</b>
+                  </div>
+                ) : null}
                 <div>
                   <span>Subtotal</span>
                   <b className="tabular">{rp(subtotal)}</b>
@@ -701,6 +748,18 @@ export function KasirPage({
           </div>
         </aside>
       </div>
+      {memberOpen ? (
+        <MemberPickDialog
+          memberId={memberId}
+          setMemberId={setMemberId}
+          joinName={joinName}
+          joinPhone={joinPhone}
+          setJoinName={setJoinName}
+          setJoinPhone={setJoinPhone}
+          cartTotal={total}
+          onClose={() => setMemberOpen(false)}
+        />
+      ) : null}
       {extraEdit ? (
         <ExtraFillDialog
           kind={extraEdit}
@@ -755,6 +814,10 @@ export function KasirPage({
           change={change}
           memberId={memberId}
           setMemberId={setMemberId}
+          joinName={joinName}
+          joinPhone={joinPhone}
+          setJoinName={setJoinName}
+          setJoinPhone={setJoinPhone}
           error={err}
           onClose={() => setPayOpen(false)}
           onPaid={savePay}
@@ -804,6 +867,215 @@ export function KasirPage({
         </div>
       ) : null}
     </>
+  );
+}
+
+function MemberPicker({
+  memberId,
+  setMemberId,
+  joinName,
+  joinPhone,
+  setJoinName,
+  setJoinPhone,
+  cartTotal,
+  compact = false,
+}: {
+  memberId: string | null;
+  setMemberId: (id: string | null) => void;
+  joinName: string;
+  joinPhone: string;
+  setJoinName: (v: string) => void;
+  setJoinPhone: (v: string) => void;
+  cartTotal: number;
+  compact?: boolean;
+}) {
+  const [q, setQ] = useState("");
+  const [browse, setBrowse] = useState(!compact);
+  const members = listMembers();
+  const selected = members.find((m) => m.id === memberId) ?? null;
+  const needle = q.trim().toLowerCase();
+  const digits = q.replace(/\D/g, "");
+  const hits = members.filter((m) => {
+    if (!needle) return true;
+    return m.name.toLowerCase().includes(needle) || (digits.length > 0 && m.phone.includes(digits));
+  });
+  const canJoin = cartTotal >= MEMBER_MIN_SPEND;
+  const joining = Boolean(joinName.trim() || joinPhone.trim());
+  const open = !compact || browse || joining;
+
+  if (selected) {
+    const visits = memberVisitCount(selected.id);
+    const pending = memberPendingRewards(selected.id);
+    const cycle = visits % MEMBER_VISIT_GOAL;
+    const filled = cycle === 0 && visits > 0 ? MEMBER_VISIT_GOAL : cycle;
+    return (
+      <div className="pay-member">
+        <div className="pay-member-on">
+          <div>
+            <b>{selected.name}</b>
+            <span>
+              {selected.phone} · {visits}/{MEMBER_VISIT_GOAL} belanja
+              {pending > 0 ? ` · siap hadiah ${pending}x` : ""}
+            </span>
+          </div>
+          <Button
+            type="button"
+            variant="ghost"
+            onClick={() => {
+              setMemberId(null);
+              setJoinName("");
+              setJoinPhone("");
+              if (compact) setBrowse(true);
+            }}
+          >
+            Ganti
+          </Button>
+        </div>
+        <div className="member-progress">
+          <div className="member-bar">
+            <i style={{ width: `${(filled / MEMBER_VISIT_GOAL) * 100}%` }} />
+          </div>
+        </div>
+      </div>
+    );
+  }
+
+  if (!open) {
+    return (
+      <button type="button" className="pay-member-toggle" onClick={() => setBrowse(true)}>
+        <span>
+          <b>Pilih member</b>
+          <span>Opsional · klik untuk cari nama</span>
+        </span>
+      </button>
+    );
+  }
+
+  return (
+    <div className="pay-member">
+      {compact ? (
+        <button type="button" className="pay-member-toggle on" onClick={() => setBrowse(false)}>
+          <span>
+            <b>Pilih member</b>
+            <span>Klik untuk tutup daftar</span>
+          </span>
+        </button>
+      ) : null}
+      <Field
+        autoFocus={open}
+        placeholder="Cari nama atau nomor telepon…"
+        value={q}
+        onChange={(e) => setQ(e.target.value)}
+      />
+      {hits.length ? (
+        <div className="pay-member-hits">
+          {hits.map((m) => {
+            const visits = memberVisitCount(m.id);
+            const pending = memberPendingRewards(m.id);
+            return (
+              <button
+                key={m.id}
+                type="button"
+                onClick={() => {
+                  setJoinName("");
+                  setJoinPhone("");
+                  setMemberId(m.id);
+                }}
+              >
+                <b>{m.name}</b>
+                <span>
+                  {m.phone} · {visits}/{MEMBER_VISIT_GOAL}
+                  {pending > 0 ? " · siap hadiah" : ""}
+                </span>
+              </button>
+            );
+          })}
+        </div>
+      ) : (
+        <Text small tone="secondary">
+          {members.length ? "Tidak ketemu." : "Belum ada member terdaftar."}
+        </Text>
+      )}
+      {canJoin ? (
+        <div className="member-join">
+          <Text small tone="secondary">
+            Daftar baru gratis. Syarat belanja {rp(MEMBER_MIN_SPEND)}. Hadiah {MEMBER_VISIT_GOAL}x: {MEMBER_REWARD_NAME}.
+          </Text>
+          <Field placeholder="Nama member baru" value={joinName} onChange={(e) => setJoinName(e.target.value)} />
+          <Field
+            inputMode="tel"
+            placeholder="Nomor telepon"
+            value={joinPhone}
+            onChange={(e) => setJoinPhone(e.target.value)}
+          />
+        </div>
+      ) : (
+        <Text small tone="secondary">
+          Daftar member gratis mulai belanja {rp(MEMBER_MIN_SPEND)}.
+        </Text>
+      )}
+    </div>
+  );
+}
+
+function MemberPickDialog({
+  memberId,
+  setMemberId,
+  joinName,
+  joinPhone,
+  setJoinName,
+  setJoinPhone,
+  cartTotal,
+  onClose,
+}: {
+  memberId: string | null;
+  setMemberId: (id: string | null) => void;
+  joinName: string;
+  joinPhone: string;
+  setJoinName: (v: string) => void;
+  setJoinPhone: (v: string) => void;
+  cartTotal: number;
+  onClose: () => void;
+}) {
+  return (
+    <div className="overlay extra-overlay" onMouseDown={onClose}>
+      <div className="modal extra-modal extra-modal-member" onMouseDown={(e) => e.stopPropagation()}>
+        <header className="extra-modal-head">
+          <span className="extra-modal-ico" aria-hidden>
+            <CartExtraIcon name="member" />
+          </span>
+          <div>
+            <h2 className="h2">Member</h2>
+            <p>Pilih member, atau daftar gratis jika belanja {rp(MEMBER_MIN_SPEND)}.</p>
+          </div>
+        </header>
+        <MemberPicker
+          memberId={memberId}
+          setMemberId={setMemberId}
+          joinName={joinName}
+          joinPhone={joinPhone}
+          setJoinName={setJoinName}
+          setJoinPhone={setJoinPhone}
+          cartTotal={cartTotal}
+        />
+        <div className="extra-actions">
+          <Button type="button" variant="primary" onClick={onClose}>
+            Simpan
+          </Button>
+          <Button
+            type="button"
+            onClick={() => {
+              setMemberId(null);
+              setJoinName("");
+              setJoinPhone("");
+              onClose();
+            }}
+          >
+            Tanpa member
+          </Button>
+        </div>
+      </div>
+    </div>
   );
 }
 
@@ -956,6 +1228,10 @@ function PayDialog({
   change,
   memberId,
   setMemberId,
+  joinName,
+  joinPhone,
+  setJoinName,
+  setJoinPhone,
   error,
   onClose,
   onPaid,
@@ -969,6 +1245,10 @@ function PayDialog({
   change: number;
   memberId: string | null;
   setMemberId: (id: string | null) => void;
+  joinName: string;
+  joinPhone: string;
+  setJoinName: (v: string) => void;
+  setJoinPhone: (v: string) => void;
   error: string;
   onClose: () => void;
   onPaid: () => void;
@@ -984,17 +1264,6 @@ function PayDialog({
   const bankLine = [settings.bankName.trim(), settings.bankAccount.trim(), settings.bankHolder.trim() ? `a.n. ${settings.bankHolder.trim()}` : ""]
     .filter(Boolean)
     .join(" ");
-  const [memberQ, setMemberQ] = useState("");
-  const members = listMembers();
-  const selected = members.find((m) => m.id === memberId) ?? null;
-  const hits = memberQ.trim()
-    ? members
-        .filter((m) => {
-          const s = memberQ.trim().toLowerCase();
-          return m.name.toLowerCase().includes(s) || m.phone.includes(s.replace(/\D/g, ""));
-        })
-        .slice(0, 6)
-    : [];
 
   return (
     <div className="overlay" style={{ position: "fixed", inset: 0 }}>
@@ -1017,46 +1286,16 @@ function PayDialog({
             <span>Total yang harus dibayar</span>
             <b className="tabular">{rp(total)}</b>
           </div>
-          <div className="pay-member">
-            {selected ? (
-              <div className="pay-member-on">
-                <div>
-                  <b>{selected.name}</b>
-                  <span>
-                    {selected.phone} · {memberVisitCount(selected.id)}/{MEMBER_VISIT_GOAL} belanja
-                  </span>
-                </div>
-                <Button type="button" variant="ghost" onClick={() => setMemberId(null)}>
-                  Hapus
-                </Button>
-              </div>
-            ) : (
-              <>
-                <Field
-                  placeholder="Member: nama atau telepon (opsional)"
-                  value={memberQ}
-                  onChange={(e) => setMemberQ(e.target.value)}
-                />
-                {hits.length ? (
-                  <div className="pay-member-hits">
-                    {hits.map((m) => (
-                      <button
-                        key={m.id}
-                        type="button"
-                        onClick={() => {
-                          setMemberId(m.id);
-                          setMemberQ("");
-                        }}
-                      >
-                        <b>{m.name}</b>
-                        <span>{m.phone}</span>
-                      </button>
-                    ))}
-                  </div>
-                ) : null}
-              </>
-            )}
-          </div>
+          <MemberPicker
+            memberId={memberId}
+            setMemberId={setMemberId}
+            joinName={joinName}
+            joinPhone={joinPhone}
+            setJoinName={setJoinName}
+            setJoinPhone={setJoinPhone}
+            cartTotal={total}
+            compact
+          />
           <div className="pay-methods">
             {methods.map((m) => (
               <button

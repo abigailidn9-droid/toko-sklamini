@@ -104,6 +104,7 @@ CREATE TABLE IF NOT EXISTS expenses (
   category TEXT NOT NULL,
   amount INTEGER NOT NULL,
   note TEXT NOT NULL,
+  fund TEXT NOT NULL DEFAULT 'laci',
   created_at TEXT NOT NULL,
   cashier_name TEXT NOT NULL
 );

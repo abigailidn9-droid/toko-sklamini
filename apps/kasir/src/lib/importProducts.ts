@@ -1,4 +1,4 @@
-import { parseRupiah, PRODUCT_CATEGORIES } from "@sklamini/shared";
+import { parseQty, parseRupiah, PRODUCT_CATEGORIES } from "@sklamini/shared";
 
 export type ProductImport = {
   barcode: string;
@@ -7,6 +7,7 @@ export type ProductImport = {
   category: string;
   buyPrice: number;
   sellPrice: number;
+  openingQty: number;
 };
 
 const HEADER_MAP: Record<string, keyof ProductImport | "skip"> = {
@@ -31,8 +32,9 @@ const HEADER_MAP: Record<string, keyof ProductImport | "skip"> = {
   jual: "sellPrice",
   harga: "sellPrice",
   sell: "sellPrice",
-  stok: "skip",
-  stock: "skip",
+  stok: "openingQty",
+  stock: "openingQty",
+  qty: "openingQty",
 };
 
 function cellStr(v: unknown): string {
@@ -46,7 +48,7 @@ function headerKey(s: string): string {
 
 function matchCategory(raw: string): string {
   const q = raw.trim().toLowerCase();
-  if (!q) return "Sembako";
+  if (!q) return PRODUCT_CATEGORIES[0];
   const hit = PRODUCT_CATEGORIES.find((c) => c.toLowerCase() === q);
   if (hit) return hit;
   const partial = PRODUCT_CATEGORIES.find((c) => c.toLowerCase().includes(q) || q.includes(c.toLowerCase()));
@@ -74,6 +76,7 @@ function mapByHeader(header: string[], row: string[]): ProductImport | null {
     category: matchCategory(cellStr(row[idx.category ?? 3])),
     buyPrice: parseRupiah(cellStr(row[idx.buyPrice ?? 4])),
     sellPrice: parseRupiah(cellStr(row[idx.sellPrice ?? 5])),
+    openingQty: parseQty(cellStr(idx.openingQty != null ? row[idx.openingQty] ?? "" : "")),
   };
 }
 
@@ -93,6 +96,7 @@ function mapPositional(cells: string[]): ProductImport | null {
     category: matchCategory(rest[2] ?? ""),
     buyPrice: parseRupiah(rest[3] ?? ""),
     sellPrice: parseRupiah(rest[4] ?? ""),
+    openingQty: parseQty(rest[5] ?? ""),
   };
 }
 
@@ -198,4 +202,40 @@ export async function parseProductFile(file: File): Promise<ProductImport[]> {
     return parsePdfProducts(file);
   }
   return parseCsvProducts(await file.text());
+}
+
+export type ProductExportRow = {
+  barcode: string;
+  name: string;
+  unit: string;
+  category: string;
+  buyPrice: number;
+  sellPrice: number;
+  stock: number;
+};
+
+export async function downloadProductsExcel(products: ProductExportRow[], filename: string): Promise<void> {
+  const XLSX = await import("xlsx");
+  const rows = products.map((p) => ({
+    Barcode: p.barcode,
+    Nama: p.name,
+    Satuan: p.unit,
+    Kategori: p.category,
+    "Harga beli": p.buyPrice,
+    "Harga jual": p.sellPrice,
+    Stok: p.stock,
+  }));
+  const ws = XLSX.utils.json_to_sheet(rows);
+  ws["!cols"] = [
+    { wch: 16 },
+    { wch: 36 },
+    { wch: 8 },
+    { wch: 16 },
+    { wch: 14 },
+    { wch: 14 },
+    { wch: 10 },
+  ];
+  const wb = XLSX.utils.book_new();
+  XLSX.utils.book_append_sheet(wb, ws, "Produk");
+  XLSX.writeFile(wb, filename);
 }

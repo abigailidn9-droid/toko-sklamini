@@ -6,11 +6,12 @@ import {
   parseQty,
   parseRupiah,
   rp,
+  todayIso,
 } from "@sklamini/shared";
 import { Button, Field, H2, Select, Text } from "../ui/primitives.tsx";
 import { PageShell } from "../components/PageHeader.tsx";
-import { parseProductFile } from "../lib/importProducts.ts";
-import { listProducts, upsertProduct } from "../lib/repo.ts";
+import { downloadProductsExcel, parseProductFile } from "../lib/importProducts.ts";
+import { deactivateProduct, listProducts, upsertProduct } from "../lib/repo.ts";
 import { useToast } from "../ui/toast.tsx";
 import { useScanFocus } from "../lib/useScanFocus.ts";
 
@@ -19,19 +20,20 @@ const emptyForm = {
   barcode: "",
   name: "",
   unit: "pcs",
-  category: "Sembako",
+  category: "Hot Wheels",
   buyPrice: "",
   sellPrice: "",
   openingStock: "",
 };
 
 export function ProdukPage({ tick, onChange }: { tick: number; onChange: () => void }) {
-  const products = useMemo(() => listProducts(true), [tick]);
+  const products = useMemo(() => listProducts(), [tick]);
   const toast = useToast();
   const [open, setOpen] = useState(false);
   const [editing, setEditing] = useState(false);
   const [form, setForm] = useState(emptyForm);
   const [newCategory, setNewCategory] = useState(false);
+  const [deleteTarget, setDeleteTarget] = useState<{ id: string; name: string } | null>(null);
   const [q, setQ] = useState("");
   const [cat, setCat] = useState("Semua");
   const [importOpen, setImportOpen] = useState(false);
@@ -65,6 +67,19 @@ export function ProdukPage({ tick, onChange }: { tick: number; onChange: () => v
     );
   });
 
+  async function exportExcel() {
+    if (!shown.length) {
+      toast.show("Tidak ada produk", "info", "Tidak ada baris yang bisa diunduh.");
+      return;
+    }
+    try {
+      await downloadProductsExcel(shown, `Daftar-Produk-${todayIso()}.xlsx`);
+      toast.show(`${shown.length} produk diunduh`, "ok", "File Excel sudah tersimpan.");
+    } catch {
+      toast.show("Gagal mengunduh", "error", "Tidak bisa membuat file Excel.");
+    }
+  }
+
   async function importFile(file: File) {
     try {
       const rows = await parseProductFile(file);
@@ -72,7 +87,7 @@ export function ProdukPage({ tick, onChange }: { tick: number; onChange: () => v
         toast.show("Tidak ada produk", "info", "File tidak berisi baris yang bisa dibaca.");
         return;
       }
-      for (const r of rows) upsertProduct({ ...r, upsertByBarcode: true });
+      for (const r of rows) upsertProduct({ ...r, upsertByBarcode: true, openingQty: r.openingQty });
       toast.show(`${rows.length} produk diimpor`, "ok", "Katalog sudah diperbarui.");
       onChange();
     } catch {
@@ -106,6 +121,23 @@ export function ProdukPage({ tick, onChange }: { tick: number; onChange: () => v
     toast.show(editing ? "Produk diperbarui" : "Produk ditambahkan", "ok");
   }
 
+  function confirmDelete() {
+    if (!deleteTarget) return;
+    const res = deactivateProduct(deleteTarget.id);
+    if (!res.ok) {
+      toast.show("Tidak terhapus", "error", res.error);
+      setDeleteTarget(null);
+      return;
+    }
+    toast.show("Produk dihapus", "ok", deleteTarget.name);
+    setDeleteTarget(null);
+    setOpen(false);
+    setForm(emptyForm);
+    setNewCategory(false);
+    setEditing(false);
+    onChange();
+  }
+
   return (
     <PageShell
       page="produk"
@@ -113,6 +145,7 @@ export function ProdukPage({ tick, onChange }: { tick: number; onChange: () => v
       hint="Katalog barang, harga, dan stok."
       actions={
         <>
+        <Button onClick={() => void exportExcel()}>Excel</Button>
         <div className="import-wrap" ref={importRef}>
           <Button onClick={() => setImportOpen((v) => !v)}>Import</Button>
           {importOpen ? (
@@ -177,7 +210,7 @@ export function ProdukPage({ tick, onChange }: { tick: number; onChange: () => v
         ))}
       </div>
       <Text small tone="tertiary">
-        Import: barcode, nama, satuan, kategori, harga beli, harga jual
+        Excel berisi baris yang tampil. Import: barcode, nama, satuan, kategori, harga beli, harga jual, stok
       </Text>
       <table className="data">
         <thead>
@@ -238,7 +271,7 @@ export function ProdukPage({ tick, onChange }: { tick: number; onChange: () => v
       </table>
       {open ? (
         <div className="overlay" style={{ position: "fixed", inset: 0 }}>
-          <div className="modal">
+          <div className="modal modal-product">
             <div className="stack">
               <div className="row">
                 <H2>{editing ? "Ubah produk" : "Tambah produk"}</H2>
@@ -247,20 +280,22 @@ export function ProdukPage({ tick, onChange }: { tick: number; onChange: () => v
                   Tutup
                 </Button>
               </div>
-              <label className="field-label">
-                <span>Barcode</span>
-                <Field
-                  value={form.barcode}
-                  onChange={(e) => setForm({ ...form, barcode: e.target.value })}
-                />
-              </label>
-              <label className="field-label">
-                <span>Nama produk</span>
-                <Field
-                  value={form.name}
-                  onChange={(e) => setForm({ ...form, name: e.target.value })}
-                />
-              </label>
+              <div className="grid grid-2">
+                <label className="field-label">
+                  <span>Barcode</span>
+                  <Field
+                    value={form.barcode}
+                    onChange={(e) => setForm({ ...form, barcode: e.target.value })}
+                  />
+                </label>
+                <label className="field-label">
+                  <span>Nama produk</span>
+                  <Field
+                    value={form.name}
+                    onChange={(e) => setForm({ ...form, name: e.target.value })}
+                  />
+                </label>
+              </div>
               <div className="grid grid-2">
                 <label className="field-label">
                   <span>Satuan</span>
@@ -283,7 +318,7 @@ export function ProdukPage({ tick, onChange }: { tick: number; onChange: () => v
                         type="button"
                         onClick={() => {
                           setNewCategory(false);
-                          setForm({ ...form, category: knownCats[0] ?? "Sembako" });
+                          setForm({ ...form, category: knownCats[0] ?? "Hot Wheels" });
                         }}
                       >
                         Daftar
@@ -317,34 +352,36 @@ export function ProdukPage({ tick, onChange }: { tick: number; onChange: () => v
                   )}
                 </label>
               </div>
-              <label className="field-label">
-                <span>Harga beli</span>
-                <div className="money-field">
-                  <span>Rp</span>
-                  <input
-                    className="field"
-                    inputMode="numeric"
-                    value={form.buyPrice}
-                    onChange={(e) =>
-                      setForm({ ...form, buyPrice: formatRupiahInput(e.target.value) })
-                    }
-                  />
-                </div>
-              </label>
-              <label className="field-label">
-                <span>Harga jual</span>
-                <div className="money-field">
-                  <span>Rp</span>
-                  <input
-                    className="field"
-                    inputMode="numeric"
-                    value={form.sellPrice}
-                    onChange={(e) =>
-                      setForm({ ...form, sellPrice: formatRupiahInput(e.target.value) })
-                    }
-                  />
-                </div>
-              </label>
+              <div className="grid grid-2">
+                <label className="field-label">
+                  <span>Harga beli</span>
+                  <div className="money-field">
+                    <span>Rp</span>
+                    <input
+                      className="field"
+                      inputMode="numeric"
+                      value={form.buyPrice}
+                      onChange={(e) =>
+                        setForm({ ...form, buyPrice: formatRupiahInput(e.target.value) })
+                      }
+                    />
+                  </div>
+                </label>
+                <label className="field-label">
+                  <span>Harga jual</span>
+                  <div className="money-field">
+                    <span>Rp</span>
+                    <input
+                      className="field"
+                      inputMode="numeric"
+                      value={form.sellPrice}
+                      onChange={(e) =>
+                        setForm({ ...form, sellPrice: formatRupiahInput(e.target.value) })
+                      }
+                    />
+                  </div>
+                </label>
+              </div>
               {!editing ? (
                 <label className="field-label">
                   <span>Stok awal</span>
@@ -356,9 +393,39 @@ export function ProdukPage({ tick, onChange }: { tick: number; onChange: () => v
                   />
                 </label>
               ) : null}
-              <Button variant="primary" disabled={!form.barcode || !form.name || !form.category.trim()} onClick={save}>
-                Simpan
-              </Button>
+              <div className="row">
+                {editing ? (
+                  <Button
+                    variant="danger"
+                    onClick={() => setDeleteTarget({ id: form.id, name: form.name.trim() || "Produk" })}
+                  >
+                    Hapus
+                  </Button>
+                ) : null}
+                <span className="grow" />
+                <Button variant="primary" disabled={!form.barcode || !form.name || !form.category.trim()} onClick={save}>
+                  Simpan
+                </Button>
+              </div>
+            </div>
+          </div>
+        </div>
+      ) : null}
+      {deleteTarget ? (
+        <div className="overlay overlay-pin" style={{ position: "fixed", inset: 0, zIndex: 40 }}>
+          <div className="modal" style={{ width: 420 }}>
+            <div className="stack">
+              <H2>Hapus produk?</H2>
+              <Text tone="secondary">
+                {deleteTarget.name} akan hilang dari kasir dan katalog. Nota lama tetap ada.
+              </Text>
+              <div className="row">
+                <Button onClick={() => setDeleteTarget(null)}>Batal</Button>
+                <span className="grow" />
+                <Button variant="danger" onClick={confirmDelete}>
+                  Hapus
+                </Button>
+              </div>
             </div>
           </div>
         </div>

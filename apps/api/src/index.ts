@@ -1,9 +1,10 @@
 import { serve } from "@hono/node-server";
 import { Hono } from "hono";
 import { cors } from "hono/cors";
-import { hashPin, labaRugi, arusKas, type PayMethod } from "@sklamini/shared";
-import { eq, gte, sql } from "drizzle-orm";
+import { hashPin, labaRugi, arusKas, asExpenseFund, type PayMethod } from "@sklamini/shared";
+import { eq, gte, inArray, or, sql } from "drizzle-orm";
 import { db } from "./db/index.ts";
+import { ownerApp } from "./owner/routes.ts";
 import {
   attendances,
   cashShifts,
@@ -34,12 +35,15 @@ app.use("*", cors({ origin: corsOrigin === "*" ? "*" : corsOrigin.split(",").map
 const API_TOKEN = process.env.API_TOKEN ?? "";
 
 app.use("/v1/*", async (c, next) => {
+  if (c.req.path.startsWith("/v1/owner")) return next();
   if (!API_TOKEN) return next();
   const hdr = c.req.header("authorization") ?? "";
   const sent = hdr.replace(/^Bearer\s+/i, "").trim();
   if (sent !== API_TOKEN) return c.json({ error: "Unauthorized" }, 401);
   return next();
 });
+
+app.route("/v1/owner", ownerApp);
 
 app.get("/health", (c) => c.json({ ok: true, name: "TOKO SKLAMINI API" }));
 
@@ -60,7 +64,23 @@ app.post("/v1/auth/login", async (c) => {
 app.get("/v1/sync/pull", async (c) => {
   const since = c.req.query("since") ?? "1970-01-01T00:00:00.000Z";
   const sinceDate = new Date(since);
-  const [prod, ev, usr, emp, set, cust, fees, rewards] = await Promise.all([
+  const [
+    prod,
+    ev,
+    usr,
+    emp,
+    set,
+    cust,
+    fees,
+    rewards,
+    saleRows,
+    expRows,
+    stockInRows,
+    returnRows,
+    opnameRows,
+    attRows,
+    shiftRows,
+  ] = await Promise.all([
     db.select().from(products).where(gte(products.updatedAt, sinceDate)),
     db.select().from(stockEvents).where(gte(stockEvents.createdAt, sinceDate)),
     db.select().from(users).where(gte(users.updatedAt, sinceDate)),
@@ -69,6 +89,32 @@ app.get("/v1/sync/pull", async (c) => {
     db.select().from(customers).where(gte(customers.updatedAt, sinceDate)),
     db.select().from(customerPayments).where(gte(customerPayments.createdAt, sinceDate)),
     db.select().from(memberRewards).where(gte(memberRewards.createdAt, sinceDate)),
+    db
+      .select()
+      .from(sales)
+      .where(or(gte(sales.createdAt, sinceDate), gte(sales.voidedAt, sinceDate))),
+    db.select().from(expenses).where(gte(expenses.createdAt, sinceDate)),
+    db.select().from(stockIns).where(gte(stockIns.createdAt, sinceDate)),
+    db.select().from(returns).where(gte(returns.createdAt, sinceDate)),
+    db.select().from(opnames).where(gte(opnames.createdAt, sinceDate)),
+    db.select().from(attendances).where(gte(attendances.createdAt, sinceDate)),
+    db
+      .select()
+      .from(cashShifts)
+      .where(or(gte(cashShifts.openedAt, sinceDate), gte(cashShifts.closedAt, sinceDate))),
+  ]);
+  const saleIds = saleRows.map((s) => s.id);
+  const stockInIds = stockInRows.map((s) => s.id);
+  const returnIds = returnRows.map((s) => s.id);
+  const opnameIds = opnameRows.map((s) => s.id);
+  const [saleItemRows, salePayRows, stockInItemRows, returnItemRows, opnameItemRows] = await Promise.all([
+    saleIds.length ? db.select().from(saleItems).where(inArray(saleItems.saleId, saleIds)) : Promise.resolve([]),
+    saleIds.length ? db.select().from(salePayments).where(inArray(salePayments.saleId, saleIds)) : Promise.resolve([]),
+    stockInIds.length
+      ? db.select().from(stockInItems).where(inArray(stockInItems.stockInId, stockInIds))
+      : Promise.resolve([]),
+    returnIds.length ? db.select().from(returnItems).where(inArray(returnItems.returnId, returnIds)) : Promise.resolve([]),
+    opnameIds.length ? db.select().from(opnameItems).where(inArray(opnameItems.opnameId, opnameIds)) : Promise.resolve([]),
   ]);
   return c.json({
     cursor: new Date().toISOString(),
@@ -80,6 +126,18 @@ app.get("/v1/sync/pull", async (c) => {
     customers: cust,
     customerPayments: fees,
     memberRewards: rewards,
+    sales: saleRows,
+    saleItems: saleItemRows,
+    salePayments: salePayRows,
+    expenses: expRows,
+    stockIns: stockInRows,
+    stockInItems: stockInItemRows,
+    returns: returnRows,
+    returnItems: returnItemRows,
+    opnames: opnameRows,
+    opnameItems: opnameItemRows,
+    attendances: attRows,
+    cashShifts: shiftRows,
   });
 });
 
@@ -234,6 +292,7 @@ async function applyItem(entity: string, payload: Record<string, unknown>) {
     return;
   }
   if (entity === "expense") {
+    const fund = asExpenseFund(payload.fund);
     await db
       .insert(expenses)
       .values({
@@ -241,10 +300,24 @@ async function applyItem(entity: string, payload: Record<string, unknown>) {
         category: String(payload.category),
         amount: Number(payload.amount),
         note: String(payload.note ?? ""),
+        fund,
         createdAt: asDate(payload.createdAt),
         cashierName: String(payload.cashierName ?? ""),
       })
-      .onConflictDoNothing();
+      .onConflictDoUpdate({
+        target: expenses.id,
+        set: {
+          category: String(payload.category),
+          amount: Number(payload.amount),
+          note: String(payload.note ?? ""),
+          fund,
+          cashierName: String(payload.cashierName ?? ""),
+        },
+      });
+    return;
+  }
+  if (entity === "expense_delete") {
+    await db.delete(expenses).where(eq(expenses.id, String(payload.id)));
     return;
   }
   if (entity === "stock_in") {
@@ -538,6 +611,9 @@ async function applyItem(entity: string, payload: Record<string, unknown>) {
         )
         .onConflictDoNothing();
     }
+    return;
+  }
+  if (entity === "data_reset") {
     return;
   }
   if (entity === "settings") {
