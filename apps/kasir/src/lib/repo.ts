@@ -516,6 +516,54 @@ export function redeemMemberReward(input: {
   return { ok: true };
 }
 
+function applyStockAdjust(input: {
+  productId: string;
+  barcode: string;
+  name: string;
+  buyPrice: number;
+  qty: number;
+  label: string;
+}): void {
+  const qty = roundQty(input.qty);
+  if (!qty) return;
+  const now = new Date().toISOString();
+  const ev = {
+    id: newId(),
+    productId: input.productId,
+    type: "adjust" as const,
+    qty,
+    refId: input.productId,
+    deviceId: deviceId(),
+    createdAt: now,
+  };
+  run(
+    `INSERT INTO stock_events (id, product_id, type, qty, ref_id, device_id, created_at)
+     VALUES (?, ?, ?, ?, ?, ?, ?)`,
+    [ev.id, ev.productId, ev.type, ev.qty, ev.refId, ev.deviceId, ev.createdAt],
+  );
+  enqueue("stock_in", {
+    doc: {
+      id: ev.id,
+      localNo: `AWL-${ev.id.slice(0, 8)}`,
+      cashierId: "local",
+      cashierName: input.label,
+      createdAt: now,
+    },
+    items: [
+      {
+        id: newId(),
+        stockInId: ev.id,
+        productId: input.productId,
+        barcode: input.barcode,
+        name: input.name,
+        qty,
+        buyPrice: input.buyPrice,
+      },
+    ],
+    events: [ev],
+  });
+}
+
 export function upsertProduct(input: {
   id?: string;
   barcode: string;
@@ -527,6 +575,7 @@ export function upsertProduct(input: {
   active?: boolean;
   upsertByBarcode?: boolean;
   openingQty?: number;
+  stockQty?: number;
 }): { ok: true; id: string } | { ok: false; error: string } {
   const barcode = input.barcode.trim();
   const name = input.name.trim();
@@ -565,6 +614,18 @@ export function upsertProduct(input: {
       active: input.active !== false,
       updatedAt: now,
     });
+    if (input.stockQty != null) {
+      const current = getProduct(input.id)?.stock ?? 0;
+      const next = roundQty(Math.max(0, input.stockQty));
+      applyStockAdjust({
+        productId: input.id,
+        barcode,
+        name,
+        buyPrice: input.buyPrice,
+        qty: next - current,
+        label: "Ubah stok",
+      });
+    }
     return { ok: true, id: input.id };
   }
 
@@ -607,40 +668,13 @@ export function upsertProduct(input: {
   });
   const openingQty = !input.id && !byBarcode ? roundQty(input.openingQty ?? 0) : 0;
   if (openingQty > 0) {
-    const ev = {
-      id: newId(),
+    applyStockAdjust({
       productId: id,
-      type: "adjust" as const,
+      barcode,
+      name,
+      buyPrice: input.buyPrice,
       qty: openingQty,
-      refId: id,
-      deviceId: deviceId(),
-      createdAt: now,
-    };
-    run(
-      `INSERT INTO stock_events (id, product_id, type, qty, ref_id, device_id, created_at)
-       VALUES (?, ?, ?, ?, ?, ?, ?)`,
-      [ev.id, ev.productId, ev.type, ev.qty, ev.refId, ev.deviceId, ev.createdAt],
-    );
-    enqueue("stock_in", {
-      doc: {
-        id: ev.id,
-        localNo: `AWL-${id.slice(0, 8)}`,
-        cashierId: "local",
-        cashierName: "Stok awal",
-        createdAt: now,
-      },
-      items: [
-        {
-          id: newId(),
-          stockInId: ev.id,
-          productId: id,
-          barcode,
-          name,
-          qty: openingQty,
-          buyPrice: input.buyPrice,
-        },
-      ],
-      events: [ev],
+      label: "Stok awal",
     });
   }
   return { ok: true, id };

@@ -1,6 +1,6 @@
 [package]
 name = "sklamini-kasir"
-version = "1.4.3"
+version = "1.4.4"
 description = "Kasir TOKO SKLAMINI"
 authors = ["TOKO SKLAMINI"]
 edition = "2021"

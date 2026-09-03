@@ -29,7 +29,6 @@ jobs:
           releaseBody: |
             Kasir Windows.
 
-            Tab kategori kosong di Produk tidak tampil. Laporan stok hanya barang di katalog.
-            Pasang sebagai update. Backup dulu.
+            Stok barang bisa diubah di Master produk. Pasang sebagai update. Backup dulu.
           releaseDraft: false
           prerelease: false

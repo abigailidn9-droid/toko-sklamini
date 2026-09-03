@@ -118,6 +118,7 @@ export function ProdukPage({ tick, onChange }: { tick: number; onChange: () => v
       buyPrice: parseRupiah(form.buyPrice),
       sellPrice: parseRupiah(form.sellPrice),
       openingQty: editing ? 0 : parseQty(form.openingStock),
+      stockQty: editing ? parseQty(form.openingStock) : undefined,
     });
     if (!res.ok) {
       toast.show("Tidak tersimpan", "error", res.error);
@@ -247,7 +248,7 @@ export function ProdukPage({ tick, onChange }: { tick: number; onChange: () => v
                   category: p.category,
                   buyPrice: formatRupiahInput(String(p.buyPrice)),
                   sellPrice: formatRupiahInput(String(p.sellPrice)),
-                  openingStock: "",
+                  openingStock: formatQty(p.stock),
                 });
                 setEditing(true);
                 setNewCategory(false);
@@ -392,17 +393,15 @@ export function ProdukPage({ tick, onChange }: { tick: number; onChange: () => v
                   </div>
                 </label>
               </div>
-              {!editing ? (
-                <label className="field-label">
-                  <span>Stok awal</span>
-                  <Field
-                    inputMode="decimal"
-                    placeholder="0"
-                    value={form.openingStock}
-                    onChange={(e) => setForm({ ...form, openingStock: e.target.value })}
-                  />
-                </label>
-              ) : null}
+              <label className="field-label">
+                <span>{editing ? "Stok" : "Stok awal"}</span>
+                <Field
+                  inputMode="decimal"
+                  placeholder="0"
+                  value={form.openingStock}
+                  onChange={(e) => setForm({ ...form, openingStock: e.target.value })}
+                />
+              </label>
               <div className="row">
                 {editing ? (
                   <Button
