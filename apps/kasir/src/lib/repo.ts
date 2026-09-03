@@ -2308,9 +2308,7 @@ export function stockReport(range: { from: string; to: string }) {
     };
   });
 
-  const shown = rows.filter(
-    (r) => r.awal || r.masuk || r.keluar || r.akhir || activeIds.has(r.productId),
-  );
+  const shown = rows.filter((r) => activeIds.has(r.productId));
   const totals = shown.reduce(
     (n, r) => ({
       awal: n.awal + r.awal,

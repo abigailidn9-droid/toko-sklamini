@@ -839,7 +839,7 @@ export async function ownerStock(from: string, to: string) {
       akhir: awal + masuk - keluar,
     };
   });
-  const shown = rows.filter((r) => r.awal || r.masuk || r.keluar || r.akhir || r.active);
+  const shown = rows.filter((r) => r.active);
   const totals = shown.reduce(
     (n, r) => ({
       awal: n.awal + r.awal,
