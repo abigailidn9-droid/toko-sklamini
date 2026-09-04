@@ -992,39 +992,6 @@ table.data tr:last-child td { border-bottom: none; }
   font-weight: 600;
   color: var(--muted);
 }
-.cart-price-btn {
-  margin: 0;
-  padding: 0;
-  border: none;
-  background: none;
-  color: var(--muted);
-  font-size: 12px;
-  font-weight: 600;
-  font-variant-numeric: tabular-nums;
-  text-align: left;
-}
-.cart-price-btn:hover { color: var(--navy); text-decoration: underline; }
-.cart-price-btn.on { color: var(--navy); }
-.cart-price-edit {
-  display: flex;
-  align-items: center;
-  gap: 6px;
-  max-width: 140px;
-}
-.cart-price-edit span {
-  font-size: 11px;
-  font-weight: 700;
-  color: var(--muted);
-}
-.cart-price-edit .field {
-  border: none;
-  box-shadow: none;
-  background: transparent;
-  padding: 0;
-  height: 22px;
-  font-size: 12px;
-  font-weight: 700;
-}
 .disc-mode {
   display: flex;
   flex-shrink: 0;

@@ -197,8 +197,6 @@ export function KasirPage({
   const [deliveryStr, setDeliveryStr] = useState(() => saved?.deliveryStr ?? "");
   const [note, setNote] = useState(() => saved?.note ?? "");
   const [extraEdit, setExtraEdit] = useState<ExtraKind | null>(null);
-  const [priceEditId, setPriceEditId] = useState<string | null>(null);
-  const [priceEditStr, setPriceEditStr] = useState("");
   const [payOpen, setPayOpen] = useState(false);
   const [payMethod, setPayMethod] = useState<PayMethod>("tunai");
   const [cashIn, setCashIn] = useState("100.000");
@@ -217,7 +215,7 @@ export function KasirPage({
     () => (memberId ? listMembers().find((m) => m.id === memberId) ?? null : null),
     [memberId, tick],
   );
-  const overlayOpen = Boolean(payOpen || extraEdit || clearOpen || priceEditId || memberOpen || !shift);
+  const overlayOpen = Boolean(payOpen || extraEdit || clearOpen || memberOpen || !shift);
   const { ref: scanRef, focus: focusScan } = useScanFocus(!overlayOpen, {
     restoreOnWindowFocus: true,
     returnAfterClick: true,
@@ -364,14 +362,6 @@ export function KasirPage({
         ? prev.filter((l) => l.productId !== productId)
         : prev.map((l) => (l.productId === productId ? { ...l, qty } : l)),
     );
-    if (qty <= 0 && priceEditId === productId) setPriceEditId(null);
-  }
-
-  function commitPrice() {
-    if (!priceEditId) return;
-    const next = parseRupiah(priceEditStr);
-    setCart((prev) => prev.map((l) => (l.productId === priceEditId ? { ...l, sellPrice: next } : l)));
-    setPriceEditId(null);
   }
 
   function switchDiscMode(mode: "rp" | "pct") {
@@ -603,46 +593,11 @@ export function KasirPage({
                 <span>Scan barcode atau klik produk</span>
               </div>
             ) : (
-              cart.map((l) => {
-                const catalog = products.find((p) => p.id === l.productId)?.sellPrice;
-                const edited = catalog != null && catalog !== l.sellPrice;
-                const editingPrice = priceEditId === l.productId;
-                return (
+              cart.map((l) => (
                 <div key={l.productId} className="cart-item">
                   <div className="cart-item-info">
                     <b>{l.name}</b>
-                    {editingPrice ? (
-                      <div className="cart-price-edit">
-                        <span>Rp</span>
-                        <input
-                          className="field"
-                          inputMode="numeric"
-                          aria-label={`Harga ${l.name}`}
-                          value={priceEditStr}
-                          onChange={(e) => setPriceEditStr(formatRupiahInput(e.target.value))}
-                          autoFocus
-                          onBlur={commitPrice}
-                          onKeyDown={(e) => {
-                            if (e.key === "Enter") {
-                              e.preventDefault();
-                              e.currentTarget.blur();
-                            }
-                          }}
-                        />
-                      </div>
-                    ) : (
-                      <button
-                        type="button"
-                        className={`cart-price-btn${edited ? " on" : ""}`}
-                        title="Ubah harga"
-                        onClick={() => {
-                          setPriceEditId(l.productId);
-                          setPriceEditStr(formatRupiahInput(String(l.sellPrice)));
-                        }}
-                      >
-                        {rp(l.sellPrice)}
-                      </button>
-                    )}
+                    <span className="tabular">{rp(l.sellPrice)}</span>
                   </div>
                   <div className="cart-item-qty">
                     <QtyStepper value={l.qty} onChange={(qty) => setQty(l.productId, qty)} />
@@ -657,8 +612,7 @@ export function KasirPage({
                   </div>
                   <div className="cart-item-sum tabular">{rp(l.sellPrice * l.qty)}</div>
                 </div>
-                );
-              })
+              ))
             )}
           </div>
           <div className="cart-footer">

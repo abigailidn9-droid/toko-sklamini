@@ -29,6 +29,6 @@ jobs:
           releaseBody: |
             Kasir Windows.
 
-            Stok barang bisa diubah di Master produk. Pasang sebagai update. Backup dulu.
+            Harga di keranjang tidak bisa diubah. Pasang sebagai update. Backup dulu.
           releaseDraft: false
           prerelease: false
