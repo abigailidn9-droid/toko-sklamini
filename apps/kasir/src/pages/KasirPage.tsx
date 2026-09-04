@@ -269,7 +269,6 @@ export function KasirPage({
     setDeliveryStr("");
     setNote("");
     setExtraEdit(null);
-    setPriceEditId(null);
     setMemberId(null);
     setJoinName("");
     setJoinPhone("");
