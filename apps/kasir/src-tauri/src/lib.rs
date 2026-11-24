@@ -100,21 +100,71 @@ fn sqlite_path(app: &tauri::AppHandle) -> Result<std::path::PathBuf, String> {
     Ok(dir.join("kasir.sqlite"))
 }
 
+fn looks_like_sqlite(bytes: &[u8]) -> bool {
+    bytes.starts_with(b"SQLite format 3\0")
+}
+
+fn read_sqlite_candidate(path: &std::path::Path) -> Option<Vec<u8>> {
+    let bytes = std::fs::read(path).ok()?;
+    if bytes.is_empty() || !looks_like_sqlite(&bytes) {
+        return None;
+    }
+    Some(bytes)
+}
+
+/// Tulis lewat file sementara + rename, supaya mati listrik tidak menimpa
+/// `kasir.sqlite` dengan data setengah jadi. Salinan terakhir yang bagus
+/// disimpan sebagai `kasir.sqlite.bak`.
+fn atomic_write_sqlite(path: &std::path::Path, bytes: &[u8]) -> Result<(), String> {
+    use std::io::Write;
+
+    let tmp = path.with_extension("sqlite.tmp");
+    let bak = path.with_extension("sqlite.bak");
+
+    {
+        let mut file = std::fs::File::create(&tmp).map_err(|e| e.to_string())?;
+        file.write_all(bytes).map_err(|e| e.to_string())?;
+        file.sync_all().map_err(|e| e.to_string())?;
+    }
+
+    if path.exists() {
+        let _ = std::fs::remove_file(&bak);
+        std::fs::rename(path, &bak).map_err(|e| e.to_string())?;
+    }
+
+    match std::fs::rename(&tmp, path) {
+        Ok(()) => Ok(()),
+        Err(err) => {
+            // Windows kadang gagal rename-over; pulihkan file utama dari bak.
+            if bak.exists() && !path.exists() {
+                let _ = std::fs::rename(&bak, path);
+            }
+            let _ = std::fs::remove_file(&tmp);
+            Err(err.to_string())
+        }
+    }
+}
+
 #[tauri::command]
 fn load_sqlite(app: tauri::AppHandle) -> Result<Option<String>, String> {
     let path = sqlite_path(&app)?;
-    if !path.exists() {
-        return Ok(None);
+    let bak = path.with_extension("sqlite.bak");
+    for candidate in [&path, &bak] {
+        if let Some(bytes) = read_sqlite_candidate(candidate) {
+            return Ok(Some(data_encoding_base64(&bytes)));
+        }
     }
-    let bytes = std::fs::read(path).map_err(|e| e.to_string())?;
-    Ok(Some(data_encoding_base64(&bytes)))
+    Ok(None)
 }
 
 #[tauri::command]
 fn save_sqlite(app: tauri::AppHandle, data: String) -> Result<(), String> {
     let path = sqlite_path(&app)?;
     let bytes = data_decoding_base64(&data)?;
-    std::fs::write(path, bytes).map_err(|e| e.to_string())
+    if !looks_like_sqlite(&bytes) {
+        return Err("Data bukan database SQLite yang valid".into());
+    }
+    atomic_write_sqlite(&path, &bytes)
 }
 
 fn data_encoding_base64(bytes: &[u8]) -> String {

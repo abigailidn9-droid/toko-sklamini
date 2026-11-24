@@ -82,7 +82,14 @@ export default function App() {
         setSettings(loadSettings());
         setReady(true);
       } catch (e) {
-        setBootErr(e instanceof Error ? e.message : "Gagal membuka database");
+        const msg = e instanceof Error ? e.message : "Gagal membuka database";
+        const corrupt =
+          /file is not a database|not a database|database disk image is malformed/i.test(msg);
+        setBootErr(
+          corrupt
+            ? "Database lokal rusak (sering setelah mati listrik). Tutup aplikasi, ganti nama file kasir.sqlite di folder data jadi kasir.sqlite.rusak, lalu buka lagi. Atau pulihkan dari backup Pengaturan."
+            : msg,
+        );
       }
     })();
     return () => {

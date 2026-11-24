@@ -90,13 +90,36 @@ function base64ToBytes(raw: string): Uint8Array {
   return out;
 }
 
+function isSqliteHeader(bytes: Uint8Array): boolean {
+  const magic = "SQLite format 3\0";
+  if (bytes.length < magic.length) return false;
+  for (let i = 0; i < magic.length; i++) {
+    if (bytes[i] !== magic.charCodeAt(i)) return false;
+  }
+  return true;
+}
+
+function tryOpenBytes(SQL: SqlJsStatic, bytes: Uint8Array | null | undefined): SqlJsDatabase | null {
+  if (!bytes?.length || !isSqliteHeader(bytes)) return null;
+  try {
+    const next = new SQL.Database(bytes);
+    const probe = next.prepare("SELECT name FROM sqlite_master LIMIT 1");
+    probe.step();
+    probe.free();
+    return next;
+  } catch {
+    return null;
+  }
+}
+
 async function loadBytesDisk(): Promise<Uint8Array | null> {
   const invoke = tauriInvoke();
   if (!invoke) return null;
   try {
     const raw = await invoke("load_sqlite");
     if (typeof raw !== "string" || !raw) return null;
-    return base64ToBytes(raw);
+    const bytes = base64ToBytes(raw);
+    return isSqliteHeader(bytes) ? bytes : null;
   } catch {
     return null;
   }
@@ -110,12 +133,6 @@ async function saveBytesDisk(bytes: Uint8Array): Promise<void> {
   } catch {
     /* IndexedDB tetap jadi cadangan */
   }
-}
-
-async function loadBytes(): Promise<Uint8Array | null> {
-  const disk = await loadBytesDisk();
-  if (disk?.length) return disk;
-  return loadBytesIdb();
 }
 
 async function saveBytes(bytes: Uint8Array): Promise<void> {
@@ -140,8 +157,12 @@ export async function openDb(): Promise<SqlJsDatabase> {
   const init = window.initSqlJs;
   if (!init) throw new Error("SQLite tidak tersedia di browser ini");
   SQL ??= await init({ locateFile: (file) => `/${file}` });
-  const bytes = await loadBytes();
-  db = bytes ? new SQL.Database(bytes) : new SQL.Database();
+
+  // Disk dulu, lalu IndexedDB. File rusak (mati lampu) dilewati, bukan menghentikan app.
+  const disk = await loadBytesDisk();
+  const idbBytes = await loadBytesIdb();
+  db = tryOpenBytes(SQL, disk) ?? tryOpenBytes(SQL, idbBytes) ?? new SQL.Database();
+
   const { SCHEMA_SQL } = await import("./schema.ts");
   db.run(SCHEMA_SQL);
   migrateSchema(db);
